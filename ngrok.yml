@@ -1,0 +1,9 @@
+# Phone tunnel for the connection server.
+# Replace the https url below, then from the project folder run:
+# ngrok start phone --config $env:LOCALAPPDATA\ngrok\ngrok.yml --config ngrok.yml
+version: 3
+endpoints:
+  - name: phone
+    url: detached-tasty-pronto.ngrok-free.dev
+    upstream:
+      url: http://127.0.0.1:8080
