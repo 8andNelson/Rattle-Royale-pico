@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+.coverage
+htmlcov/
+.tox/
+
+# PyCharm
+.idea/
+
+# Arduino / PlatformIO
+*.hex
+*.elf
+*.bin
+*.eep
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Secrets and local config
+.env
+.env.*
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
