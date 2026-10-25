@@ -11,16 +11,16 @@ from server.pico_link import PicoLink, mark_position
 
 class OrderTests(unittest.TestCase):
     def test_no_round_sends_the_robot_home(self) -> None:
-        self.assertEqual(PicoLink("t").order(LobbyBook()), {"mode": "home", "reset": None})
+        self.assertEqual(PicoLink("t").order(LobbyBook(chase_countdown=0)), {"mode": "home", "reset": None})
 
     def test_an_open_round_with_no_pull_holds(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         self.assertEqual(PicoLink("t").order(book), {"mode": "hold", "round": code, "reset": None})
 
     def test_the_chased_seat_becomes_a_point_on_the_circle(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
         book.join(code, "Cy")
@@ -35,7 +35,7 @@ class OrderTests(unittest.TestCase):
         self.assertAlmostEqual(order["y"], 200)
 
     def test_a_test_point_is_used_only_without_a_round(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         robot = PicoLink("t")
         robot.set_test_point({"x": 100, "y": -50})
         self.assertEqual(robot.order(book), {"mode": "test", "x": 100.0, "y": -50.0, "reset": None})
@@ -47,7 +47,7 @@ class OrderTests(unittest.TestCase):
 
     def test_a_poll_keeps_the_pose_and_reports_each_arrival_once(self) -> None:
         robot = PicoLink("t")
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         report = {"x": 1, "y": 2, "heading": 90, "moving": True, "arrived": {"round": "ABCD", "seat": 2}}
         _, first = robot.poll(book, report, now=10)
         _, second = robot.poll(book, report, now=11)
@@ -63,7 +63,7 @@ class OrderTests(unittest.TestCase):
 
 class EndpointTests(AioHTTPTestCase):
     async def get_application(self):
-        return create_app("secret")
+        return create_app("secret", chase_countdown=0)
 
     async def test_a_wrong_token_is_refused(self) -> None:
         response = await self.client.post("/api/robot", json={}, headers={"Authorization": "Bearer nope"})

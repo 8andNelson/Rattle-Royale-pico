@@ -13,7 +13,7 @@ HOME = {"x": 0, "y": 0, "heading": 0, "moving": False}
 
 class StopRuleTests(unittest.TestCase):
     def test_stopping_a_chase_ends_it_with_no_winner(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         book.record_shakes(ada, 5)
@@ -25,14 +25,14 @@ class StopRuleTests(unittest.TestCase):
         self.assertFalse(book.stop_chase(code))
 
     def test_a_shake_contest_cannot_be_stopped_as_a_chase(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         book.start(ada)
         self.assertFalse(book.stop_chase(code))
 
     def test_a_halted_robot_gets_stop_until_resumed_or_reset(self) -> None:
         robot = PicoLink("t")
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         robot.halt()
         self.assertEqual(robot.order(book)["mode"], "stop")
         self.assertTrue(robot.summary()["halted"])
@@ -45,7 +45,7 @@ class StopRuleTests(unittest.TestCase):
 
 class StopEndpointTests(AioHTTPTestCase):
     async def get_application(self):
-        return create_app("secret")
+        return create_app("secret", chase_countdown=0)
 
     async def poll(self, report: dict) -> dict:
         response = await self.client.post("/api/robot", json=report, headers={"Authorization": "Bearer secret"})

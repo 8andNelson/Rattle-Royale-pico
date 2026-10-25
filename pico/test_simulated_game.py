@@ -43,7 +43,7 @@ class RobotThread(threading.Thread):
 
 class GameTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.runner = web.AppRunner(create_app(TOKEN))
+        self.runner = web.AppRunner(create_app(TOKEN, chase_countdown=0))
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
         await site.start()

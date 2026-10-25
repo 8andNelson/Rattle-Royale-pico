@@ -19,7 +19,7 @@ def finish_by_clock(book: LobbyBook, code: str) -> dict:
 
 class ChaseRuleTests(unittest.TestCase):
     def test_a_chase_runs_longer_than_the_shake_contest(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         lobby = book._lobbies[code]
@@ -28,14 +28,14 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertTrue(book.snapshot(code, ada)["chase"])
 
     def test_the_robot_ignores_a_plain_shake_contest(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, _ = book.create("Ada")
         book.start(ada)
         book.record_shakes(ada, 3)
         self.assertIsNone(book.robot_round())
 
     def test_arrival_wins_for_that_seat_even_without_the_lead(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
         book.start(ada, chase=True)
@@ -49,7 +49,7 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertIsNone(book.robot_round())
 
     def test_arrival_does_nothing_outside_an_open_chase(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         self.assertFalse(book.arrive(code, 0))
         book.start(ada)
@@ -57,7 +57,7 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertFalse(book.arrive("ZZZZ", 0))
 
     def test_the_clock_gives_the_win_to_the_player_being_chased(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
         book.start(ada, chase=True)
@@ -68,7 +68,7 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertEqual(snapshot["reason"], "clock")
 
     def test_nobody_chased_at_the_clock_is_a_draw(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         snapshot = finish_by_clock(book, code)
@@ -76,7 +76,7 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertEqual(snapshot["reason"], "draw")
 
     def test_the_result_stays_after_the_winner_leaves(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
         book.start(ada, chase=True)
@@ -87,7 +87,7 @@ class ChaseRuleTests(unittest.TestCase):
         self.assertEqual(snapshot["reason"], "arrival")
 
     def test_the_shake_contest_still_names_the_most_shakes(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
         book.start(ada)
@@ -99,7 +99,7 @@ class ChaseRuleTests(unittest.TestCase):
 
 class RobotPollTests(unittest.TestCase):
     def test_a_reported_arrival_ends_the_chase_and_sends_the_robot_home(self) -> None:
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         robot = PicoLink("t")
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
@@ -112,7 +112,7 @@ class RobotPollTests(unittest.TestCase):
 
     def test_home_needs_a_still_robot_near_the_center_facing_seat_0(self) -> None:
         robot = PicoLink("t")
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         self.assertFalse(robot.at_home())
         robot.poll(book, HOME)
         self.assertTrue(robot.at_home())
@@ -127,7 +127,7 @@ class RobotPollTests(unittest.TestCase):
 
     def test_a_reset_changes_the_id_in_every_order(self) -> None:
         robot = PicoLink("t")
-        book = LobbyBook()
+        book = LobbyBook(chase_countdown=0)
         robot.poll(book, dict(HOME, x=200))
         self.assertIsNone(robot.order(book)["reset"])
         robot.request_reset()
@@ -140,7 +140,7 @@ class RobotPollTests(unittest.TestCase):
 
 class StartTests(AioHTTPTestCase):
     async def get_application(self):
-        return create_app("secret")
+        return create_app("secret", chase_countdown=0)
 
     async def poll(self, report: dict) -> dict:
         response = await self.client.post("/api/robot", json=report, headers={"Authorization": "Bearer secret"})

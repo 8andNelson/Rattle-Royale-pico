@@ -48,6 +48,16 @@ POST /api/robot  --HTTPS via ngrok-->      game server
 - The onboard LED shows the link: a fast blink while joining Wi-Fi, a slow blink while looking for the server, solid when online, and a double blink while a host has the robot stopped.
 - Each move ramps from `START_STEP_US` (3000) to `STEP_US` (2000) over `RAMP_STEPS` (200), and slows the same way before it ends, so the motors cruise faster than they could start.
 
+### Phones, reconnects, and the big screen
+
+- A chase opens after a 3-second countdown (`CHASE_COUNTDOWN_SECONDS`). Phones show "Get ready 3, 2, 1" and do not count shakes until it opens. The robot holds still through the countdown. The 20-second contest has no countdown.
+- A phone that joins gets a private seat token, kept for that browser tab. If its connection drops, the player shows as "reconnecting" and keeps the seat, score, and pull for `RECONNECT_GRACE_SECONDS` (15). A phone that comes back in time resumes the seat, even after a reload. Shakes made during the gap do not count. After the grace the seat is dropped, and a late phone is told to join again.
+- The same seat opened in a second tab moves to the new tab, and the first tab says so.
+- **Leave lobby** drops the seat at once.
+- A reload keeps the seat, but the browser asks for motion permission again, so the page asks the player to tap **Enable shaking** once more.
+- The phone vibrates when the robot starts coming for that player, and again when that player wins.
+- `/screen` is a read-only big screen for a laptop or projector: `http://<host>/screen?code=ABCD`, or enter the code on the page. It shows the arena large, the join address and code, the countdown and clock, the chase line, every player's shakes with a pull bar, and the result. It follows the lobby into a rematch. The phone page and the big screen draw the arena from the same `/arena.js`.
+
 ### Host stop
 
 The lobby creator sees a red **Stop the robot** button whenever the robot is online. During a chase only that lobby's creator can press it.
@@ -113,7 +123,7 @@ The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `ar
 3. The creator taps **Start game**. A 20-second countdown runs from the server’s end time. Seat numbers lock, and each seat gets the angle it will keep for the round.
 4. Shakes add to that player’s score only while the countdown is running. The same shakes add pull. Pull fades while the round is open, and the phone with the strongest pull is the one the robot would chase. The list on every phone shows the same scores and pull. The personal shake total is hidden on the join screen and appears once the round has started.
 5. At zero, the highest shake count wins. If several players share that score, all of their names are shown. Pull is not the winner. The leave button is hidden during the 20 seconds and comes back with the result.
-6. Leaving the lobby removes that player and sets their phone’s shake count back to 0. After the result, the creator can tap **Rematch**. Everyone moves to a fresh lobby under a new code, with scores at 0 and seats packed again, and new players can join that code before the next start.
+6. Leaving the lobby removes that player at once and sets their phone’s shake count back to 0. A dropped connection only marks them away for 15 seconds. After the result, the creator can tap **Rematch**. Everyone moves to a fresh lobby under a new code, with scores at 0 and seats packed again, and new players can join that code before the next start.
 
 One player is enough to start. The creator is the person who created the lobby. If they leave and someone is still in it, the next person in the list becomes the creator.
 
@@ -142,8 +152,8 @@ After shaking is enabled, the page asks for a display name and, to join an exist
 - Before the round starts, a player who leaves is removed and the later seats pack down. After the start, a seat number stays put when someone leaves.
 - The page shows “You are seat 3” and “Stand on mark 3” in the lobby. It does not draw the circle.
 - Empty names, names longer than 20 characters, duplicate names in the same lobby, a full lobby (8 players), an unknown code, and a join after the start get a clear message on the page.
-- A refresh or a dropped connection removes the player. The page does not resume the same seat.
-- The page shows connecting and reconnecting. After a disconnect it returns to the join screen.
+- A refresh or a dropped connection keeps the seat for 15 seconds. The page resumes it with its seat token.
+- The page shows connecting and reconnecting, and keeps the lobby on screen while it gets the seat back.
 
 ### Shake detection
 
@@ -163,8 +173,8 @@ When the round ends, the page shows the winner, or every tied name, and the fina
 
 ### Phone edge cases
 
-- A phone that loses the connection shows “reconnecting” and returns to the join screen. It cannot upload shakes from the gap.
-- Leaving, or closing the page, removes that player from the lobby immediately.
+- A phone that loses the connection shows “reconnecting” and resumes its seat when it comes back within 15 seconds. It cannot upload shakes from the gap.
+- Leaving removes that player from the lobby immediately. Closing the page is a dropped connection.
 
 ## Game server
 
@@ -191,7 +201,7 @@ Any player who has enabled shaking can create a lobby from their phone.
 
 The creator starts the round. Other players do not start it.
 
-Start broadcasts the lobby with the round end timestamp, 20 seconds out. Phones display that timestamp. The server is the clock that ends the round. There is no separate countdown before the shakes begin. Shakes before this start do not score.
+Start broadcasts the lobby with the round end timestamp, 20 seconds out. Phones display that timestamp. The server is the clock that ends the round. The contest has no countdown before the shakes begin. A chase has a 3-second countdown. Shakes before the round opens do not score.
 
 Start also locks the seat list. Seat `i` of `N` players receives the angle `i × 360° / N`. People can still leave during the lobby, so the count is the number of players present at start. The page shows the seat number. The angle is stored for the later robot and is not drawn.
 
@@ -220,7 +230,7 @@ Pull is a decaying score on top of the shake count. It is who the robot would fo
 
 ### Disconnects
 
-A WebSocket close removes the player immediately. There is no reconnect grace and no reserved seat. If the creator leaves and the lobby is not empty, the next player becomes the creator. If they leave during a finished round, the result remains for whoever is still there.
+A WebSocket close marks the player away and holds the seat for 15 seconds. A phone that sends its seat token back in time resumes it. Otherwise the seat is dropped. If the creator leaves and the lobby is not empty, the next player becomes the creator. If they leave during a finished round, the result remains for whoever is still there.
 
 ### Server state
 
@@ -235,7 +245,7 @@ Each lobby moves through this sequence:
 
 Seats, floor marks, fading pull, and the chase line are already in the running server. The sections below are the motion that is not built. The laptop would turn the chase target into short spins and drives, track the robot’s pose, and be able to end a round because the robot arrived.
 
-The running round does not do that. It lasts 20 seconds, the winner is the highest shake count, and a disconnect removes the player immediately. A later chase round would last longer, keep a seat through a short reconnect, and name a winner by arrival or by who the robot was chasing when the clock ended. Those rules are written below and are not in the server.
+The running round does not do that. It lasts 20 seconds and the winner is the highest shake count. The chase round with the Pico W robot, described under Wireless robot above, is built: it lasts longer, keeps a seat through a short reconnect, and names a winner by arrival or by who the robot was chasing when the clock ended.
 
 ## Physical model the software depends on
 
@@ -278,7 +288,7 @@ While nobody has any pull, the robot holds still. The first shakes are what get 
 
 ## Chase phone client
 
-A mobile web page, served by the laptop, for the robot game. The running page already shows the seat, the mark, the pull, and who would be chased. It does not draw an arena or the robot’s pose, and a refresh does not resume the same seat.
+A mobile web page, served by the laptop, for the robot game. The running page already shows the seat, the mark, the pull, and who would be chased. With the Pico W robot it also draws the arena and the robot's pose, and a refresh resumes the same seat.
 
 The page has four jobs: join a room, show which floor mark to stand on, count shakes, and show the live chase.
 

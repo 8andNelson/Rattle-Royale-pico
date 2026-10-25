@@ -9,7 +9,13 @@ the robot would follow.
 When the robot is online at the start, the round is a chase instead: it runs
 longer, the robot reaching a mark wins for that seat, and at the clock the
 player being chased wins. Nobody chased at the clock is a draw. A host who
-stops the robot ends the chase with no winner.
+stops the robot ends the chase with no winner. A chase opens after a short
+countdown, so everyone starts shaking together. Shakes in the countdown do
+not count.
+
+A player whose phone drops is only marked away. The server removes them if
+they do not come back in time. A phone that comes back resumes the same seat,
+score, and pull, and its shakes from the gap do not count.
 """
 
 import secrets
@@ -19,6 +25,7 @@ from dataclasses import dataclass
 MAX_PLAYERS = 8
 ROUND_SECONDS = 20
 CHASE_ROUND_SECONDS = 60
+CHASE_COUNTDOWN_SECONDS = 3
 MAX_SHAKE_JUMP = 12
 SCORE_GRACE_SECONDS = 0.5
 PULL_HALF_LIFE_SECONDS = 2.5
@@ -45,6 +52,7 @@ class Player:
     seat: int = 0
     angle: float | None = None
     pull: float = 0.0
+    away: bool = False
 
 
 @dataclass
@@ -54,6 +62,7 @@ class Lobby:
     players: list[Player]
     started: bool = False
     finished: bool = False
+    opens_at: float | None = None
     ends_at: float | None = None
     pull_at: float | None = None
     chase_id: str | None = None
@@ -65,9 +74,10 @@ class Lobby:
 
 
 class LobbyBook:
-    def __init__(self) -> None:
+    def __init__(self, chase_countdown: float = CHASE_COUNTDOWN_SECONDS) -> None:
         self._lobbies: dict[str, Lobby] = {}
         self._membership: dict[str, str] = {}
+        self.chase_countdown = chase_countdown
 
     def create(self, name: str) -> tuple[str, str]:
         cleaned = clean_name(name)
@@ -113,6 +123,29 @@ class LobbyBook:
             self._retarget(lobby)
         return code
 
+    def set_away(self, player_id: str, away: bool) -> str | None:
+        """Mark a player's phone gone or back. Returns the lobby code."""
+        code = self._membership.get(player_id)
+        if code is None:
+            return None
+        self._player(self._lobbies[code], player_id).away = away
+        return code
+
+    def is_away(self, player_id: str) -> bool:
+        code = self._membership.get(player_id)
+        return code is not None and self._player(self._lobbies[code], player_id).away
+
+    def resume(self, player_id: str, total: object) -> str:
+        """A phone came back. Its next totals count from the total it has now."""
+        code = self._membership.get(player_id)
+        if code is None:
+            raise LobbyError("That seat is gone. Join again.")
+        player = self._player(self._lobbies[code], player_id)
+        player.away = False
+        if type(total) is int and total >= 0:
+            player.accepted_shakes = total
+        return code
+
     def check_start(self, player_id: str) -> Lobby:
         lobby = self._lobby_for(player_id)
         if player_id != lobby.creator_id:
@@ -128,8 +161,9 @@ class LobbyBook:
             player.angle = 360 * player.seat / count
         lobby.started = True
         lobby.chase = chase
-        lobby.ends_at = time.time() + (CHASE_ROUND_SECONDS if chase else ROUND_SECONDS)
-        lobby.pull_at = time.time()
+        lobby.opens_at = time.time() + (self.chase_countdown if chase else 0)
+        lobby.ends_at = lobby.opens_at + (CHASE_ROUND_SECONDS if chase else ROUND_SECONDS)
+        lobby.pull_at = lobby.opens_at
         lobby.chase_id = None
         return lobby.code
 
@@ -145,7 +179,10 @@ class LobbyBook:
         if not lobby.finished:
             raise LobbyError("The game is not over yet.")
         code = self._new_code()
-        players = [Player(player.player_id, player.name, seat=index) for index, player in enumerate(lobby.players)]
+        players = [
+            Player(player.player_id, player.name, seat=index, away=player.away)
+            for index, player in enumerate(lobby.players)
+        ]
         del self._lobbies[lobby.code]
         self._lobbies[code] = Lobby(code, lobby.creator_id, players)
         for player in players:
@@ -163,6 +200,8 @@ class LobbyBook:
             return lobby.code, True
         if type(total) is not int or total < 0:
             raise LobbyError("That shake total could not be read.")
+        if lobby.opens_at is not None and now < lobby.opens_at:
+            return lobby.code, False
         changed = self._decay_to(lobby, now)
         player = next(player for player in lobby.players if player.player_id == player_id)
         if total > player.accepted_shakes:
@@ -260,7 +299,7 @@ class LobbyBook:
             return []
         return [player.player_id for player in lobby.players]
 
-    def snapshot(self, code: str, viewer_id: str) -> dict:
+    def snapshot(self, code: str, viewer_id: str | None) -> dict:
         lobby = self._lobbies[code]
         return {
             "type": "lobby",
@@ -268,6 +307,7 @@ class LobbyBook:
             "max": MAX_PLAYERS,
             "started": lobby.started,
             "finished": lobby.finished,
+            "opens_at": None if lobby.opens_at is None else int(lobby.opens_at * 1000),
             "ends_at": None if lobby.ends_at is None else int(lobby.ends_at * 1000),
             "chase": lobby.chase,
             "winners": lobby.winners or [],
@@ -278,6 +318,9 @@ class LobbyBook:
                 for player in snapshot_players(lobby)
             ],
         }
+
+    def _player(self, lobby: Lobby, player_id: str) -> Player:
+        return next(player for player in lobby.players if player.player_id == player_id)
 
     def _lobby_for(self, player_id: str) -> Lobby:
         code = self._membership.get(player_id)
@@ -348,12 +391,13 @@ def snapshot_players(lobby: Lobby) -> list[Player]:
     return sorted(lobby.players, key=lambda player: (-player.pull, player.seat))
 
 
-def player_snapshot(player: Player, viewer_id: str, started: bool, chase_id: str | None) -> dict:
+def player_snapshot(player: Player, viewer_id: str | None, started: bool, chase_id: str | None) -> dict:
     entry = {
         "name": player.name,
         "you": player.player_id == viewer_id,
         "shakes": player.shakes,
         "seat": player.seat,
+        "away": player.away,
     }
     if started:
         entry["angle"] = player.angle
