@@ -1,9 +1,9 @@
-"""Phone connection, lobbies, and a 20-second shake game.
+"""Phone connection, lobbies, and a 45-second chase.
 
 A phone can create or join a lobby of up to eight players. Each player gets a
-seat and a floor mark. The creator starts the game. Shakes add to that
-player's score until the timer ends, and fading pull shows who the robot
-would chase.
+seat and a floor mark. The creator starts the game. Shakes add pull, and the
+robot creeps toward the leader when the Arduino is online. Reaching a mark
+wins. If time runs out, the chased player wins.
 """
 
 import asyncio
@@ -14,6 +14,7 @@ import time
 from aiohttp import ClientConnectionError, WSMsgType, web
 
 from server.bridge import Bridge
+from server.chase import follow
 from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
 
 HOST = "0.0.0.0"
@@ -136,14 +137,18 @@ PAGE = """<!DOCTYPE html>
       joinEl.hidden = !shaking;
     }
 
-    function winnerText(winners) {
-      if (!winners || winners.length === 0) {
-        return "No winner";
+    function winnerText(message) {
+      const winners = message.winners || [];
+      if (message.reason === "draw" || winners.length === 0) {
+        return "Draw";
       }
-      if (winners.length === 1) {
-        return winners[0] + " wins";
+      let text = winners.length === 1 ? winners[0] + " wins" : "Tie: " + winners.join(", ");
+      if (message.reason === "arrival") {
+        text += " — the robot got there";
+      } else if (message.reason === "clock") {
+        text += " — time ran out";
       }
-      return "Tie: " + winners.join(", ");
+      return text;
     }
 
     function runCountdown(endsAt) {
@@ -214,7 +219,7 @@ PAGE = """<!DOCTYPE html>
         stopCountdown();
         clock.hidden = true;
         result.hidden = false;
-        result.textContent = winnerText(message.winners);
+        result.textContent = winnerText(message);
       } else {
         stopCountdown();
         clock.hidden = true;
@@ -597,6 +602,7 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             await broadcast(app, code)
             app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
             app.setdefault("pull_tasks", {})[code] = asyncio.create_task(fade_pull(app, code))
+            app.setdefault("chase_tasks", {})[code] = asyncio.create_task(chase_round(app, code))
         elif kind == "shakes":
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
@@ -615,20 +621,37 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
     return player_id
 
 
+async def chase_round(app: web.Application, code: str) -> None:
+    book: LobbyBook = app["book"]
+    try:
+        await follow(book, app["bridge"], code)
+    except Exception:
+        log.exception("lobby %s chase stopped", code)
+        book.finish_draw(code)
+    finally:
+        app.setdefault("chase_tasks", {}).pop(code, None)
+    if book.member_ids(code):
+        await broadcast(app, code)
+
+
 async def finish_when_due(app: web.Application, code: str) -> None:
     book: LobbyBook = app["book"]
-    while True:
-        deadline = book.deadline(code)
-        if deadline is None:
-            return
-        delay = deadline - time.time()
-        if delay <= 0:
-            break
-        await asyncio.sleep(delay)
-    if book.finish_if_due(code):
-        log.info("lobby %s finished", code)
-        await broadcast(app, code)
-    app.setdefault("round_tasks", {}).pop(code, None)
+    try:
+        while True:
+            deadline = book.deadline(code)
+            if deadline is None:
+                return
+            delay = deadline - time.time()
+            if delay > 0:
+                await asyncio.sleep(min(delay, 0.25))
+                continue
+            if book.finish_if_due(code):
+                log.info("lobby %s finished", code)
+                await broadcast(app, code)
+                return
+            await asyncio.sleep(0.05)
+    finally:
+        app.setdefault("round_tasks", {}).pop(code, None)
 
 
 async def fade_pull(app: web.Application, code: str) -> None:

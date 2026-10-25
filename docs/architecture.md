@@ -1,39 +1,39 @@
 # Rattle Royale architecture
 
-Rattle Royale is a party game for phones, with a two-motor robot on the bench. The running game is a lobby and a 20-second shake contest. Players open a page from the laptop, enable shaking, and join a lobby of up to 8 people. Each player gets a seat and a floor mark. The creator starts the round. Everyone shakes. The highest shake count when the timer ends wins.
+Rattle Royale is a party game for phones, with a two-motor robot on the bench. The running game is a lobby and a 45-second chase. Players open a page from the laptop, enable shaking, and join a lobby of up to 8 people. Each player gets a seat and a floor mark. The creator starts the round. Everyone shakes. The robot creeps toward whoever is shaking now. Reaching a mark wins. If the clock runs out first, the chased player wins. Nobody shaking is a draw.
 
-During that round the server also keeps a fading pull score and picks who the robot would chase. Every phone shows that name. The robot does not move during a round. `server/bridge.py` can open the Arduino port, and nothing in a round sends it a move yet.
+During that round the server keeps a fading pull score and, when the Arduino is online, sends one short spin or drive at a time toward that player. Every phone shows the name. `server/bridge.py` opens the Arduino port. If `RATTLE_PORT` is unset, the round still runs and the robot stays still.
 
 The phones do not drive motors. The laptop runs the page, the lobby, the clock, the scores, and the chase line. Campus Wi-Fi often blocks a phone from opening the laptop’s own address, so phones use an ngrok HTTPS tunnel to that same server. iOS also requires HTTPS before it will share motion data.
 
 ```text
 Phones (up to 8)                         Laptop
 Enable shaking, then join  --WebSocket--  Game server
-    shake total during the round              lobby, seats, 20s clock, scores
-                                              fading pull, chase target, winner
+    shake total during the round              lobby, seats, 45s clock, scores
+                                              fading pull, chase, pose, winner
 ```
 
-Pose and the next-chunk choice are in the server. A round does not call them. The chase round that would send those chunks and end on arrival is specified further down and is not running. Seats, marks, fading pull, and the chase line already are.
+A round keeps a pose, asks the planner for one chunk, and sends that chunk through the bridge. Reconnect grace, return-to-home, and a drawn arena are specified further down and are not built. Seats, marks, fading pull, and the chase line are in the running game.
 
 | Piece | Where it runs | Now |
 |---|---|---|
 | Phone client | Browser on each phone | Join a lobby, show the seat and mark, count shakes, show pull, the chase line, the timer, and the winner |
-| Game server | Laptop, port 8080 | Rooms, names, seats, 20-second clock, shake scores, fading pull, chase target, winner |
+| Game server | Laptop, port 8080 | Rooms, names, seats, 45-second clock, shake scores, fading pull, chase target, pose, winner |
 | ngrok | Laptop, forwarding to port 8080 | Public HTTPS address for phones |
-| Pose | Same laptop | `server/pose.py` stores `x`, `y`, and heading, and updates them from a finished move. A round does not keep a pose yet |
-| Motion planner | Same laptop | `server/planner.py` turns that pose and a mark into one short `SPIN` or `DRIVE`, or reports a reached mark. A round does not call it yet |
-| Serial bridge | Same laptop, using pyserial | Opens `RATTLE_PORT` at startup, sends one command, and waits for the reply. A round does not send moves yet |
+| Pose | Same laptop | `server/pose.py` stores `x`, `y`, and heading. A round starts at home and updates the pose from each finished move |
+| Motion planner | Same laptop | `server/planner.py` turns that pose and a mark into one short `SPIN` or `DRIVE`, or reports a reached mark. The chase loop calls it |
+| Serial bridge | Same laptop, using pyserial | Opens `RATTLE_PORT` at startup. The chase sends one command and waits for the reply |
 | Firmware | Arduino | `firmware/dual_motor` accepts `SPIN`, `DRIVE`, `STOP`, and `PING`. `drive_test` rolls the car. `spin_test` turns it in place |
 
 ## What already exists
 
 The phone game lives in `server/`. Start it from the project folder with `python -m server`. It serves the page at `/` and a WebSocket at `/ws`. `requirements.txt` includes `aiohttp` for that server and `pyserial` for the Arduino link. `server/bridge.py` is the only module that imports `pyserial`.
 
-`server/lobby.py` assigns seats, locks each seat’s angle when the round starts, accepts shake totals, fades pull, and chooses the chase target. `server/test_lobby.py` and `server/test_pull.py` cover that. `server/test_bridge.py` covers the serial link with a fake port. `server/pose.py` stores the robot pose, and `server/test_pose.py` covers updates from a finished move. `server/planner.py` chooses the next chunk, and `server/test_planner.py` covers that choice. Neither of those two modules opens the serial port, and the round does not call them. The page in `server/app.py` shows the seat, the mark, the pull, and who would be chased. The winner is still the highest shake count.
+`server/lobby.py` assigns seats, locks each seat’s angle when the round starts, accepts shake totals, fades pull, and chooses the chase target. `server/test_lobby.py` and `server/test_pull.py` cover that. `server/test_bridge.py` covers the serial link with a fake port. `server/pose.py` stores the robot pose, and `server/test_pose.py` covers updates from a finished move. `server/planner.py` chooses the next chunk, and `server/test_planner.py` covers that choice. `server/chase.py` runs the loop during a round, and `server/test_chase.py` covers it with a fake robot. The page in `server/app.py` shows the seat, the mark, the pull, who is being chased, and whether the win was by arrival or by the clock.
 
 `ngrok.yml` points a public HTTPS address at `http://127.0.0.1:8080`. The phone page follows whatever address it was opened on, so the WebSocket uses the ngrok host when the page was opened through the tunnel.
 
-The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `firmware/dual_motor` accepts motion commands. The phone round does not send those commands yet. Set `RATTLE_PORT` to the board’s COM port before starting the server, and close the serial monitor first. The server keeps that port open. If the variable is unset, or the board does not answer, the server logs that the robot is offline and the lobby still runs.
+The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `firmware/dual_motor` accepts motion commands. Set `RATTLE_PORT` to the board’s COM port before starting the server, and close the serial monitor first. The server keeps that port open and the chase sends chunks through it. If the variable is unset, or the board does not answer, the server logs that the robot is offline, the chase holds still, and the lobby still runs.
 
 - Motor 1 uses Arduino pins 4, 5, 6, and 7.
 - Motor 2 uses Arduino pins A0, A1, A2, and A3.
@@ -48,9 +48,9 @@ The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `fi
 
 1. The player opens the page and taps **Enable shaking**. The name and lobby controls stay hidden until that succeeds. A phone with no motion sensor never gets them.
 2. They enter a name and either create a lobby or join with a 4-character code. The lobby lists every name and seat. The phone says which seat they are and which floor mark to stand on.
-3. The creator taps **Start game**. A 20-second countdown runs from the server’s end time. Seat numbers lock, and each seat gets the angle it will keep for the round.
-4. Shakes add to that player’s score only while the countdown is running. The same shakes add pull. Pull fades while the round is open, and the phone with the strongest pull is the one the robot would chase. The list on every phone shows the same scores and pull. The personal shake total is hidden on the join screen and appears once the round has started.
-5. At zero, the highest shake count wins. If several players share that score, all of their names are shown. Pull is not the winner. The leave button is hidden during the 20 seconds and comes back with the result.
+3. The creator taps **Start game**. A 45-second countdown runs from the server’s end time. Seat numbers lock, and each seat gets the angle it will keep for the round. The robot is taken to be at the center, pointed at seat 0.
+4. Shakes add to that player’s score only while the countdown is running. The same shakes add pull. Pull fades while the round is open, and the phone with the strongest pull is the one the robot chases. The list on every phone shows the same scores and pull. The personal shake total is hidden on the join screen and appears once the round has started.
+5. The round ends when the robot’s pose comes within 25 mm of a mark, or when the clock runs out. Arrival names that player. The clock names the chased player, or a draw when nobody has pull. The page says which one happened. The leave button is hidden during the 45 seconds and comes back with the result.
 6. Leaving the lobby removes that player and sets their phone’s shake count back to 0. The same lobby does not start a second round. People create or join again for another game.
 
 One player is enough to start. The creator is the person who created the lobby. If they leave and someone is still in it, the next person in the list becomes the creator.
@@ -59,7 +59,7 @@ One player is enough to start. The creator is the person who created the lobby. 
 
 A mobile web page served by the laptop. Players join by opening the ngrok HTTPS link. A native app is unnecessary.
 
-The page asks for motion permission, takes a name and a lobby code, shows the seat and floor mark, counts shakes during the round, and shows the scores, the pull, who the robot would chase, the countdown, and the winner.
+The page asks for motion permission, takes a name and a lobby code, shows the seat and floor mark, counts shakes during the round, and shows the scores, the pull, who the robot is chasing, the countdown, and the winner.
 
 ### Enable shaking
 
@@ -97,7 +97,7 @@ The server is given a short grace, about half a second after zero, to accept the
 
 During the round the page shows every player’s name, seat, shake count, and pull, ordered by pull. The local player’s row is marked. The chased row is marked with the word “chased”. A line above the list says “The robot is chasing” that name, “The robot is coming for you” on that player’s own phone, or “The robot is holding still” when nobody has pull. A countdown shows the time left, using the server’s end timestamp.
 
-When the round ends, the page shows the winner, or every tied name, and the final counts. That winner is the highest shake count. The chase line stays on the frozen pull from the end of the round. The leave button is hidden while the 20 seconds are running.
+When the round ends, the page shows the winner and whether the robot got there or the clock ran out. A quiet round says draw. The chase line stays on the frozen pull from the end of the round. The leave button is hidden while the 45 seconds are running.
 
 ### Phone edge cases
 
@@ -106,7 +106,7 @@ When the round ends, the page shows the winner, or every tied name, and the fina
 
 ## Game server
 
-The game server is the source of truth for lobbies, seats, the clock, shake scores, pull, the chase target, and the winner. It runs on the laptop and speaks to phones over a WebSocket. It can open the serial port. The running lobby does not keep a robot pose, and a round does not move the motors. `server/pose.py` and `server/planner.py` are ready for a later chase round.
+The game server is the source of truth for lobbies, seats, the clock, shake scores, pull, the chase target, the pose, and the winner. It runs on the laptop and speaks to phones over a WebSocket. It can open the serial port. While a round is open, `server/chase.py` keeps a pose and sends the planner’s chunks through the bridge.
 
 ### Room creation
 
@@ -129,7 +129,7 @@ Any player who has enabled shaking can create a lobby from their phone.
 
 The creator starts the round. Other players do not start it.
 
-Start broadcasts the lobby with the round end timestamp, 20 seconds out. Phones display that timestamp. The server is the clock that ends the round. There is no separate countdown before the shakes begin. Shakes before this start do not score.
+Start broadcasts the lobby with the round end timestamp, 45 seconds out. Phones display that timestamp. The server is the clock that ends the round. There is no separate countdown before the shakes begin. Shakes before this start do not score. Start also begins the chase at home: `(0, 0)`, heading 0.
 
 Start also locks the seat list. Seat `i` of `N` players receives the angle `i × 360° / N`. People can still leave during the lobby, so the count is the number of players present at start. The page shows the seat number. The angle is stored for the later robot and is not drawn.
 
@@ -141,11 +141,11 @@ The score is the number of shakes accepted during the round. It does not fade.
 - An increase is stored only while the round is open, the total went up, and the jump is at most 12. A larger jump is dropped.
 - Totals that arrive up to about half a second after the end timestamp still count, so the last shake sent before zero is included. After that grace, the round is finished and further totals do not score.
 - The scoreboard is broadcast with each accepted change.
-- The winner is the player with the highest shake count. Everyone who shares that score is listed as a tie, including a round where the high score is zero. Pull does not pick the winner.
+- The shake count is shown on the phone. It does not pick the winner. Arrival or the chased player does, as described under Pull.
 
 ### Pull and the chase target
 
-Pull is a decaying score on top of the shake count. It is who the robot would follow. The robot is not connected, so the target is only a line on the phone.
+Pull is a decaying score on top of the shake count. It is who the robot follows. When the Arduino is offline, the target is only a line on the phone and the robot stays still.
 
 - Each accepted shake adds that same increase to the player’s pull. A dropped jump adds nothing.
 - About four times a second the server fades every player’s pull. The half-life is 2.5 seconds. Pull below 0.05 becomes zero.
@@ -165,15 +165,15 @@ A WebSocket close removes the player immediately. There is no reconnect grace an
 Each lobby moves through this sequence:
 
 1. **Lobby** — players join and leave. Shakes do not score.
-2. **Playing** — the 20-second window is open, shakes score, pull fades, the chase line is visible, and the leave button is hidden.
+2. **Playing** — the 45-second window is open, shakes score, pull fades, the chase sends chunks, and the leave button is hidden. A chunk already on the motors is allowed to finish after the clock, and the round stays open until that `DONE` is applied.
 3. **Result** — the shake-count winner is fixed, shakes no longer score, pull stays where it froze, and players can leave.
 4. The lobby ends when the last player leaves. A new round is a new lobby.
 
 ## Later: robot motion
 
-Seats, floor marks, fading pull, and the chase line are already in the running server. `server/pose.py` tracks where the robot is after a finished move. `server/planner.py` turns that pose and a mark into one short spin or drive, and it can report that a mark was reached. A round does not call either module, does not send a move through the bridge, and does not change the winner.
+Seats, floor marks, fading pull, the chase line, the pose, and the chunk loop are in the running server. A round calls `server/pose.py` and `server/planner.py`, sends one chunk through the bridge, and ends on arrival or on the clock. A disconnect still removes the player immediately.
 
-The running round lasts 20 seconds, the winner is the highest shake count, and a disconnect removes the player immediately. A later chase round would last longer, keep a seat through a short reconnect, send the planner’s chunks through the bridge, and name a winner by arrival or by who the robot was chasing when the clock ended. Those round rules are written below and are not in the server.
+A later round would keep a seat through a short reconnect and drive itself back to the center. Those rules are written below and are not in the server.
 
 ## Physical model the software depends on
 
@@ -188,7 +188,7 @@ mark(i) = (R cos θ, R sin θ)
 
 The arena is a square of 1 foot on each side, 304.8 mm. Home is the center. `R` is 152.4 mm, the circle that fits inside that square and touches the middle of each side. Every mark stays inside the square. Heading 0 points along +x, toward seat 0. Positive heading turns toward higher seat numbers. On the wire, `DRIVE` direction `1` moves the car away from seat 0, so a drive along heading 0 is sent as direction `-1`. `SPIN` direction `1` turns from seat 0 toward seat 1, which is the positive heading. `SPIN` direction `-1` turns toward lower seat numbers.
 
-`server/pose.py` stores the robot’s pose: `x` and `y` in millimeters, heading in degrees, and whether that pose is known. Home is `(0, 0)`, heading 0, known. Every finished spin updates the heading. Every finished drive updates `x` and `y` along the heading it had when the drive started. `STOP`, a timeout, or a dropped cable marks the pose unknown, and a later `DONE` is ignored until home is confirmed. Confirming home sets `(0, 0)`, heading 0, known. The pose is only trustworthy if the round begins on the home pose and every chunk runs to completion. The running lobby does not keep a pose yet.
+`server/pose.py` stores the robot’s pose: `x` and `y` in millimeters, heading in degrees, and whether that pose is known. Home is `(0, 0)`, heading 0, known. Every finished spin updates the heading. Every finished drive updates `x` and `y` along the heading it had when the drive started. `STOP`, a timeout, or a dropped cable marks the pose unknown, and a later `DONE` is ignored until home is confirmed. Confirming home sets `(0, 0)`, heading 0, known. The pose is only trustworthy if the round begins on the home pose and every chunk runs to completion. Each round starts a fresh pose at home.
 
 Players stand on their marks and stay there. The arrival radius in `server/planner.py` is 25 mm, a starting value smaller than the distance from the mark to the player’s feet, so the robot can “reach” someone and stop short of them. Home is 152.4 mm from every mark, so the center does not count as an arrival.
 
@@ -200,7 +200,7 @@ Open-loop steppers drift if the robot is bumped or a move is cut off. Between ga
 
 ## How a chase round feels
 
-This is the later robot round, not the 20-second contest above.
+The running round already chases for 45 seconds and ends on arrival or on the clock. The steps below add a countdown before shaking, a drawn arena, and a return to the center between games.
 
 1. Players join, get a seat, and stand on that mark. The robot sits at the center, pointed at seat 0.
 2. The host starts. A short countdown plays. Shakes during the countdown do not count.
@@ -267,7 +267,7 @@ When the server ends the round, the page switches to the result: winner name and
 
 ## Chase game server
 
-The running server is already the source of truth for rooms, seats, the 20-second clock, shake scores, pull, and the chase target. The winner it broadcasts is still the highest shake count. It can open the serial port. `server/pose.py` and `server/planner.py` are not called from a round. The chase server described here would keep a pose for the room, send the planner’s chunks through the bridge, and end the round on arrival, on the same WebSocket.
+The running server is already the source of truth for rooms, seats, the 45-second clock, shake scores, pull, the chase target, and the pose. It opens the serial port, sends the planner’s chunks, and ends the round on arrival or on the clock. The chase server described here would add reconnect grace and a host confirm-home step on the same WebSocket.
 
 ### Room creation
 
@@ -378,21 +378,21 @@ Direction `-1` travels along the heading. At heading 0 that increases `x` and le
 
 `mark_at` places a mark on the 152.4 mm circle. Angle 0 is seat 0, at `(152.4, 0)`.
 
-Let the target mark be `(tx, ty)`, and let the bearing from the robot to that mark be `bearing`. The heading error is the shortest signed angle from the current heading to `bearing`, from −180° through 180°. An error of exactly 180° spins toward higher seat numbers.
+Let the target mark be `(tx, ty)`, and let the bearing from the robot to that mark be `bearing`. The heading error is the shortest signed angle from the current heading to `bearing`, from −180° through 180°.
 
 `plan` checks every supplied mark, then chooses at most one chunk:
 
 - If the pose is unknown, send nothing and do not report an arrival.
 - If there is no target, send nothing.
 - If any mark is within 25 mm, report that mark’s index and send nothing. The closest mark wins. An equal distance keeps the earlier mark.
-- If the absolute heading error is above 15°, send `SPIN` for the smaller of the error and 5°, in the direction of the error. With the 5° cap, that chunk is 190 steps, about 0.6 seconds at 3 ms per step.
-- Otherwise send `DRIVE` for the smaller of the remaining distance and 30 mm, forward along the heading. That is direction `-1`. A full 30 mm chunk is 1029 steps, about 3 seconds. A shorter remainder is not padded out to 30 mm.
+- If the absolute heading error is under 90°, face the mark. While that error is above 15°, send `SPIN` for the smaller of the error and 5°, in the direction of the error. Once it is within 15°, send `DRIVE` forward along the heading, direction `-1`.
+- If the absolute heading error is 90° or more, point the tail at the mark and reverse. The spin is the shorter turn onto that reverse line, still capped at 5°. An error of 180° is already on that line, so the chunk is a reverse `DRIVE`, direction `1`, with no spin. Within 15° of the reverse line, the drive is direction `1`.
 
-These chunk sizes and the 25 mm arrival radius are starting values at the top of `server/planner.py`, to be tuned on the chassis. An error of exactly 15° drives.
+A 5° spin is 190 steps, about 0.6 seconds at 3 ms per step. A full 30 mm drive is 1029 steps, about 3 seconds. A shorter remainder is not padded out to 30 mm. These chunk sizes, the 15° band, the 90° reverse choice, and the 25 mm arrival radius are starting values at the top of `server/planner.py`, to be tuned on the chassis. An error of exactly 15° drives forward. An error of exactly 90° lines up to reverse.
 
 ### Arrival and the clock
 
-Arrival across every mark is in `plan`. That covers a short drive that enters a mark just as the lead changes. The running server does not end a round on that report. The winner is still the highest shake count.
+Arrival across every mark is in `plan`. That covers a short drive that enters a mark just as the lead changes. `server/chase.py` ends the round on that report and names that player, even if the clock has also run out.
 
 The clock rule is not in the planner. When a chase round exists, the server lets the chunk already in flight finish, then stops. It does not start another move. The server names the current target as the clock winner.
 
@@ -417,14 +417,14 @@ The planner never reads accelerometers and never computes pull. The server hands
 
 ## Serial bridge
 
-`server/bridge.py` is the only code that opens the Arduino port. It uses pyserial. One thread reads and writes that port, so a wait cannot freeze the phone server. The planner does not call it yet. When a chase round does, it will hand the bridge one chunk at a time and wait for completion before the next, so a drive cannot start on top of a spin.
+`server/bridge.py` is the only code that opens the Arduino port. It uses pyserial. One thread reads and writes that port, so a wait cannot freeze the phone server. `server/chase.py` hands the bridge one chunk at a time and waits for completion before the next, so a drive cannot start on top of a spin.
 
 ### Port
 
 - The port name is the `RATTLE_PORT` environment variable, such as `COM5`. Auto-detect is optional later.
 - The bridge opens that port when the game server starts and keeps it open. Opening the port usually resets the Arduino. The bridge waits up to 2 seconds for `READY`, then sends `PING`. `PONG` is what marks the link up.
 - If `RATTLE_PORT` is unset, or the port is missing, or the board does not answer, the server logs that the robot is offline and the lobby still runs. Start is not rejected. The phone does not show a robot status yet. Rejecting start while the robot is offline belongs with the later chase round.
-- A timeout, a dead cable, or a reply that does not match closes the port and leaves the bridge offline. It does not reconnect by itself, and it does not end the phone round. When a chase round is calling the planner, that failure will end the round, tell the phones the drive failed, and mark the pose unknown until the host confirms home.
+- A timeout, a dead cable, or a reply that does not match closes the port and leaves the bridge offline. It does not reconnect by itself. The chase marks the pose unknown and ends the round as a draw. The page says draw. The next round starts a new pose at home.
 
 ### Messages
 
@@ -511,8 +511,8 @@ The sketch does not know player names, seats, pull, or the round timer. It canno
 - The phone sends its running total for the open round when the count increases.
 - The server adds the increase only while the round is open, including a short grace after zero, and only when the jump is at most 12. That increase is added to both the shake count and the pull.
 - Pull halves every 2.5 seconds and drops to zero below 0.05. The chase target switches only when a challenger leads by at least 1 pull or 15% of the current pull.
-- Zero pull means the phone says the robot is holding still. The robot itself does not move.
-- The highest shake count at the end wins. Ties list every name that shares that total. Pull freezes with the result and does not pick the winner.
+- Zero pull means the phone says the robot is holding still, and the chase sends nothing.
+- Reaching a mark wins, and the page says the robot got there. If the clock runs out first, the chased player wins and the page says time ran out. Nobody shaking is a draw. Pull freezes with the result.
 - Shakes while the tab is hidden are not counted.
 - Shakes before the start and after the countdown reaches zero are not sent.
 - Leaving the lobby resets the phone’s count. A disconnect cannot fill in shakes from the gap.
@@ -527,11 +527,11 @@ The sketch does not know player names, seats, pull, or the round timer. It canno
 
 ### Pose and motion
 
-`server/pose.py` and `server/planner.py` implement the pose update and the next chunk. A round does not call them yet. The chase round would use these rules:
+`server/pose.py`, `server/planner.py`, and `server/chase.py` implement these rules:
 
 - Home is `(0, 0)`, heading 0°, pointed at seat 0. Every round starts there. The host places the robot or confirms a return-to-home.
 - Mark positions are computed from the player count at round start and do not change mid-round.
-- The robot spins the short way toward the live target, then drives while it is aligned.
+- Inside 90° the robot turns to face the live target, then drives forward. At 90° or more it turns until the tail points at the target, then reverses.
 - Both motors step on the same tick. Opposite directions spin. Matching directions drive.
 - Pose updates only from a `DONE` line for a chunk that finished every step.
 - `STOP`, a serial timeout, or a disconnect marks the pose unknown until the host confirms home.
@@ -543,25 +543,25 @@ The sketch does not know player names, seats, pull, or the round timer. It canno
 - The laptop runs the web server and the WebSocket server on port 8080. ngrok forwards a public HTTPS address to that port. Phones open the ngrok address.
 - Each player taps once to enable shaking before the lobby controls appear.
 - A lobby holds up to 8 players. Join is refused above 8 and after the start. The creator can start alone.
-- Set `RATTLE_PORT` to open the Arduino when the server starts. A round still does not send motor commands. Motor power comes from the external 5V supply, with grounds tied to the Arduino.
+- Set `RATTLE_PORT` to open the Arduino when the server starts. A round then sends one chunk at a time. Motor power comes from the external 5V supply, with grounds tied to the Arduino.
 
 ## Suggested build order
 
-The phone game below is in place, including the chase line. The car rolls and can be told to turn in place from the bench sketches. A round still does not send those moves.
+The phone game below is in place, including the chase loop. The car rolls and can be told to turn in place from the bench sketches. A round sends those moves when the robot is online.
 
 Done:
 
 1. **Connection.** The laptop serves the page and a WebSocket. Phones reach it through ngrok.
 2. **Lobby.** Create a room, join from other phones, refuse a ninth player, and require shaking first.
-3. **Shake score.** Permission, counting on the phone, totals into the server, a 20-second clock, and a winner by shake count.
+3. **Shake score.** Permission, counting on the phone, totals into the server, and a clock on the server.
 4. **Seats.** Assign a seat and a floor mark, pack seats until the start, then lock the angles.
 5. **Fading pull.** Turn accepted shakes into a score that drops when someone stops, and show who the robot would chase.
 6. **Firmware commands.** `firmware/dual_motor` runs `SPIN`, `DRIVE`, `STOP`, and `PING`, and the `DONE` reply echoes the step count and direction.
-7. **Serial bridge.** `server/bridge.py` opens `RATTLE_PORT`, sends one command, and waits for `DONE` or a timeout. A round does not call it yet.
+7. **Serial bridge.** `server/bridge.py` opens `RATTLE_PORT`, sends one command, and waits for `DONE` or a timeout.
 8. **Pose.** `server/pose.py` updates `x`, `y`, and heading from a finished `SPIN` or `DRIVE`, using 34.31 steps per millimeter and 38.03 steps per degree. Direction `-1` travels along the heading. `STOP` marks the pose unknown until home is confirmed.
-9. **Planner.** `server/planner.py` aims one short chunk at a mark on the 152.4 mm circle. A heading error above 15° is a `SPIN` of at most 5°. Within 15° the move is a `DRIVE` of at most 30 mm, direction `-1`. A new target is a spin on the next call. A mark within 25 mm is reported and no chunk is sent. A round does not call it yet.
+9. **Planner.** `server/planner.py` aims one short chunk at a mark on the 152.4 mm circle. Inside 90° it spins at most 5° toward the mark, then drives forward at most 30 mm with direction `-1`. At 90° or more it lines up the tail and reverses with direction `1`. A mark within 25 mm is reported and no chunk is sent.
+10. **Chase round.** `server/chase.py` hands the live target and the pose to the planner, sends the chunk through `server/bridge.py`, updates the pose from `DONE`, and ends the round on arrival or when the clock expires. The round is 45 seconds. A dropped cable during a move is a draw.
 
-Still to build, so the robot actually follows that target:
+Still to build:
 
-10. **Chase round.** Hand the live target and the pose to the planner, send the chunk through `server/bridge.py`, update the pose from `DONE`, and end the round on arrival or when the clock expires.
-11. **Recovery.** Return-to-home, a dropped serial cable, a hidden phone tab, and a few seconds of lost Wi-Fi.
+11. **Recovery.** Return-to-home, a hidden phone tab, and a few seconds of lost Wi-Fi.

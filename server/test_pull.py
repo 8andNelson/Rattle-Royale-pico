@@ -94,7 +94,7 @@ class PullTests(unittest.TestCase):
         self.assertEqual(bea_row["seat"], 1)
         self.assertTrue(bea_row["chased"])
 
-    def test_pull_freezes_when_the_round_finishes_and_shakes_still_pick_the_winner(self) -> None:
+    def test_pull_freezes_when_the_clock_names_the_chased_player(self) -> None:
         book = LobbyBook()
         ada, code = book.create("Ada")
         bea, _ = book.join(code, "Bea")
@@ -104,15 +104,42 @@ class PullTests(unittest.TestCase):
         lobby = book._lobbies[code]
         lobby.players[0].pull = 8
         lobby.players[1].pull = 2
+        lobby.players[1].shakes = 30
         lobby.ends_at = time.time() - 10
         lobby.pull_at = lobby.ends_at + SCORE_GRACE_SECONDS - PULL_HALF_LIFE_SECONDS
         self.assertTrue(book.finish_if_due(code))
         snapshot = book.snapshot(code, ada)
+        self.assertEqual(snapshot["reason"], "clock")
         self.assertEqual(snapshot["winners"], ["Ada"])
         self.assertEqual(players(book, code, ada)["Ada"]["pull"], 4)
         self.assertFalse(book.decay_pull(code, now=time.time() + 50))
         self.assertEqual(players(book, code, ada)["Ada"]["pull"], 4)
         self.assertFalse(book.pull_round_open(code))
+
+    def test_a_quiet_clock_is_a_draw(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        book.start(ada)
+        lobby = book._lobbies[code]
+        lobby.ends_at = time.time() - 10
+        self.assertTrue(book.finish_if_due(code))
+        snapshot = book.snapshot(code, ada)
+        self.assertEqual(snapshot["reason"], "draw")
+        self.assertEqual(snapshot["winners"], [])
+
+    def test_a_chunk_in_flight_holds_the_clock(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        book.start(ada)
+        book.record_shakes(ada, 4)
+        lobby = book._lobbies[code]
+        lobby.ends_at = time.time() - 10
+        book.set_motion(code, True)
+        self.assertFalse(book.finish_if_due(code))
+        self.assertFalse(book.snapshot(code, ada)["finished"])
+        book.set_motion(code, False)
+        self.assertTrue(book.finish_if_due(code))
+        self.assertEqual(book.snapshot(code, ada)["winners"], ["Ada"])
 
 
 if __name__ == "__main__":

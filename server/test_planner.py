@@ -23,28 +23,33 @@ def steps_for(amount: float, scale: float) -> int:
 
 
 class ChooseChunkTests(unittest.TestCase):
-    def test_a_large_heading_error_spins_one_short_chunk(self) -> None:
-        chunk = choose_chunk(90, MARK_RADIUS_MM)
+    def test_an_angle_under_90_spins_toward_the_mark(self) -> None:
+        toward = choose_chunk(40, MARK_RADIUS_MM)
+        away = choose_chunk(-40, MARK_RADIUS_MM)
+        self.assertEqual(toward, Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), 1))
+        self.assertEqual(away, Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), -1))
+
+    def test_a_right_angle_lines_up_so_reverse_points_at_the_mark(self) -> None:
+        left = choose_chunk(90, MARK_RADIUS_MM)
+        right = choose_chunk(-90, MARK_RADIUS_MM)
+        self.assertEqual(left, Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), -1))
+        self.assertEqual(right, Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), 1))
+
+    def test_past_90_the_spin_is_the_short_way_onto_the_reverse_line(self) -> None:
+        chunk = choose_chunk(120, MARK_RADIUS_MM)
+        self.assertEqual(chunk, Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), -1))
         self.assertEqual(
-            chunk,
+            choose_chunk(-120, MARK_RADIUS_MM),
             Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), 1),
         )
 
-    def test_heading_errors_above_the_cap_share_one_spin_chunk(self) -> None:
-        capped = choose_chunk(90, 100)
-        still_capped = choose_chunk(ALIGN_DEGREES + 1, 100)
-        self.assertEqual(capped, still_capped)
-        self.assertEqual(capped.steps, steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE))
-
-    def test_a_negative_heading_error_spins_toward_lower_seats(self) -> None:
-        chunk = choose_chunk(-90, MARK_RADIUS_MM)
-        self.assertEqual(chunk.command, "SPIN")
-        self.assertEqual(chunk.direction, -1)
-        self.assertEqual(chunk.steps, steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE))
-
-    def test_an_exact_half_turn_spins_toward_higher_seats(self) -> None:
+    def test_a_half_turn_reverses_without_spinning(self) -> None:
         chunk = choose_chunk(180, MARK_RADIUS_MM)
-        self.assertEqual(chunk.direction, 1)
+        self.assertEqual(chunk, Chunk("DRIVE", steps_for(MAX_DRIVE_MM, STEPS_PER_MM), 1))
+
+    def test_a_near_reverse_alignment_drives_backward(self) -> None:
+        chunk = choose_chunk(170, MARK_RADIUS_MM)
+        self.assertEqual(chunk, Chunk("DRIVE", steps_for(MAX_DRIVE_MM, STEPS_PER_MM), 1))
 
     def test_alignment_at_the_threshold_drives_forward(self) -> None:
         chunk = choose_chunk(ALIGN_DEGREES, MARK_RADIUS_MM)
@@ -78,17 +83,24 @@ class NextChunkTests(unittest.TestCase):
         self.assertAlmostEqual(x, 0, places=6)
         self.assertAlmostEqual(y, MARK_RADIUS_MM)
 
-    def test_a_mark_to_the_left_spins_toward_higher_seats(self) -> None:
-        chunk = next_chunk(Pose(), mark_at(90))
+    def test_a_mark_inside_90_degrees_spins_toward_it(self) -> None:
+        chunk = next_chunk(Pose(), mark_at(60))
         self.assertEqual(
             chunk,
             Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), 1),
         )
 
-    def test_a_mark_to_the_right_spins_the_short_way(self) -> None:
+    def test_a_mark_at_90_degrees_lines_up_to_reverse(self) -> None:
+        chunk = next_chunk(Pose(), mark_at(90))
+        self.assertEqual(
+            chunk,
+            Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), -1),
+        )
+
+    def test_a_mark_to_the_right_lines_up_to_reverse_the_other_way(self) -> None:
         chunk = next_chunk(Pose(), mark_at(270))
         self.assertEqual(chunk.command, "SPIN")
-        self.assertEqual(chunk.direction, -1)
+        self.assertEqual(chunk.direction, 1)
 
     def test_the_short_way_wraps_across_zero(self) -> None:
         pose = Pose()
@@ -105,13 +117,17 @@ class NextChunkTests(unittest.TestCase):
         self.assertEqual(chunk.command, "DRIVE")
         self.assertEqual(chunk.direction, -1)
 
-    def test_a_new_leader_is_a_spin_on_the_next_chunk(self) -> None:
+    def test_the_opposite_mark_is_a_reverse_drive(self) -> None:
+        chunk = next_chunk(Pose(), mark_at(180))
+        self.assertEqual(chunk, Chunk("DRIVE", steps_for(MAX_DRIVE_MM, STEPS_PER_MM), 1))
+
+    def test_a_mark_behind_a_sideways_robot_spins_onto_the_reverse_line(self) -> None:
         pose = Pose()
         pose.apply("SPIN", 90 * STEPS_PER_DEGREE, 1)
         chunk = next_chunk(pose, mark_at(0))
         self.assertEqual(
             chunk,
-            Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), -1),
+            Chunk("SPIN", steps_for(MAX_SPIN_DEGREES, STEPS_PER_DEGREE), 1),
         )
 
     def test_no_target_sends_nothing(self) -> None:

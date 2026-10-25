@@ -1,0 +1,127 @@
+"""Drive the live chase. One chunk at a time, then look again.
+
+The phone server calls this while a round is open. A missing robot leaves the
+round running and the robot still. A failed move marks the pose unknown and
+ends the round as a draw.
+"""
+
+import asyncio
+import logging
+
+from server.bridge import BridgeError, MoveResult
+from server.lobby import LobbyBook
+from server.planner import Chunk, mark_at, plan
+from server.pose import Pose
+
+log = logging.getLogger(__name__)
+
+LOOK_AGAIN_SECONDS = 0.05
+
+
+async def follow(book: LobbyBook, robot: object, code: str) -> None:
+    """Chase the pull leader until the round ends."""
+    pose = Pose()
+    told_offline = False
+    while book.pull_round_open(code):
+        rows = book.playing_marks(code)
+        if rows is None:
+            return
+        target, marks, ids = _geometry(rows)
+        decision = plan(pose, target, marks)
+        if decision.arrived is not None:
+            book.finish_arrival(code, ids[decision.arrived])
+            log.info("lobby %s arrived at %s", code, ids[decision.arrived])
+            return
+        if book.clock_reached(code):
+            if book.finish_if_due(code):
+                log.info("lobby %s clock ended the chase", code)
+                return
+            await asyncio.sleep(LOOK_AGAIN_SECONDS)
+            continue
+        chunk = decision.chunk
+        if chunk is None:
+            await asyncio.sleep(LOOK_AGAIN_SECONDS)
+            continue
+        if not _online(robot):
+            if not told_offline:
+                log.info("lobby %s robot is offline, chase is holding still", code)
+                told_offline = True
+            await asyncio.sleep(LOOK_AGAIN_SECONDS)
+            continue
+        told_offline = False
+        log.info("lobby %s %s %s %s", code, chunk.command, chunk.steps, chunk.direction)
+        book.set_motion(code, True)
+        retry = False
+        try:
+            try:
+                result = await asyncio.to_thread(_dispatch, robot, chunk)
+            except BridgeError as error:
+                if error.message == "A move is already running.":
+                    retry = True
+                else:
+                    pose.mark_unknown()
+                    book.finish_draw(code)
+                    log.info("lobby %s drive failed: %s", code, error.message)
+                    return
+            else:
+                if result.stopped or result.command is None:
+                    pose.mark_unknown()
+                    book.finish_draw(code)
+                    log.info("lobby %s move stopped before it finished", code)
+                    return
+                pose.apply(result.command, result.steps, result.direction)
+                log.info(
+                    "lobby %s pose x=%.1f y=%.1f heading=%.1f",
+                    code,
+                    pose.x,
+                    pose.y,
+                    pose.heading,
+                )
+                if _declare_arrival(book, pose, code):
+                    return
+        finally:
+            book.set_motion(code, False)
+        if retry:
+            await asyncio.sleep(LOOK_AGAIN_SECONDS)
+
+
+def _declare_arrival(book: LobbyBook, pose: Pose, code: str) -> bool:
+    """Name the reached player before the clock is allowed to finish the round."""
+    rows = book.playing_marks(code)
+    if rows is None:
+        return False
+    target, marks, ids = _geometry(rows)
+    decision = plan(pose, target, marks)
+    if decision.arrived is None:
+        return False
+    book.finish_arrival(code, ids[decision.arrived])
+    log.info("lobby %s arrived at %s", code, ids[decision.arrived])
+    return True
+
+
+def _geometry(
+    rows: list[tuple[str, float, bool]],
+) -> tuple[tuple[float, float] | None, list[tuple[float, float]], list[str]]:
+    target: tuple[float, float] | None = None
+    marks: list[tuple[float, float]] = []
+    ids: list[str] = []
+    for player_id, angle, chased in rows:
+        point = mark_at(angle)
+        marks.append(point)
+        ids.append(player_id)
+        if chased:
+            target = point
+    return target, marks, ids
+
+
+def _online(robot: object) -> bool:
+    online = getattr(robot, "online", False)
+    return bool(online)
+
+
+def _dispatch(robot: object, chunk: Chunk) -> MoveResult:
+    if chunk.command == "SPIN":
+        return robot.spin(chunk.steps, chunk.direction)  # type: ignore[attr-defined]
+    if chunk.command == "DRIVE":
+        return robot.drive(chunk.steps, chunk.direction)  # type: ignore[attr-defined]
+    raise BridgeError("The robot is offline.")

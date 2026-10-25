@@ -3,6 +3,7 @@
 The caller supplies the pose and a target. A reached mark is reported back
 and no chunk is sent. The planner does not read shakes and does not talk to
 the Arduino. Forward travel along the heading is ``DRIVE`` direction ``-1``.
+Reverse travel is direction ``1``.
 """
 
 import math
@@ -12,6 +13,7 @@ from server.pose import STEPS_PER_DEGREE, STEPS_PER_MM, Pose
 
 MARK_RADIUS_MM = 152.4
 ALIGN_DEGREES = 15.0
+REVERSE_DEGREES = 90.0
 MAX_SPIN_DEGREES = 5.0
 MAX_DRIVE_MM = 30.0
 ARRIVAL_RADIUS_MM = 25.0
@@ -37,13 +39,23 @@ def mark_at(angle_degrees: float) -> tuple[float, float]:
 
 
 def choose_chunk(heading_error: float, distance_mm: float) -> Chunk | None:
-    """Turn a heading error and a distance into one short ``SPIN`` or ``DRIVE``."""
-    if abs(heading_error) > ALIGN_DEGREES:
-        turn = min(abs(heading_error), MAX_SPIN_DEGREES)
-        direction = 1 if heading_error > 0 else -1
+    """Turn a heading error and a distance into one short ``SPIN`` or ``DRIVE``.
+
+    An error inside 90° faces the mark and drives forward. An error of 90° or
+    more turns until the tail points at the mark, then reverses toward it.
+    """
+    if abs(heading_error) < REVERSE_DEGREES:
+        aim_error = heading_error
+        drive_direction = -1
+    else:
+        aim_error = _signed_delta(heading_error + 180.0)
+        drive_direction = 1
+    if abs(aim_error) > ALIGN_DEGREES:
+        turn = min(abs(aim_error), MAX_SPIN_DEGREES)
+        direction = 1 if aim_error > 0 else -1
         return _chunk("SPIN", turn, STEPS_PER_DEGREE, direction)
     travel = min(max(distance_mm, 0.0), MAX_DRIVE_MM)
-    return _chunk("DRIVE", travel, STEPS_PER_MM, -1)
+    return _chunk("DRIVE", travel, STEPS_PER_MM, drive_direction)
 
 
 def plan(
@@ -101,7 +113,11 @@ def _bearing(x: float, y: float, target_x: float, target_y: float) -> float:
 
 
 def _signed_error(heading: float, bearing: float) -> float:
-    error = (bearing - heading) % 360.0
+    return _signed_delta(bearing - heading)
+
+
+def _signed_delta(degrees: float) -> float:
+    error = degrees % 360.0
     if error > 180.0:
         error -= 360.0
     if error == 0.0:
