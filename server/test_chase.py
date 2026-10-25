@@ -6,7 +6,7 @@ from aiohttp.test_utils import AioHTTPTestCase
 
 from server.app import create_app
 from server.lobby import CHASE_ROUND_SECONDS, ROUND_SECONDS, LobbyBook
-from server.robot import RobotLink
+from server.pico_link import PicoLink
 
 HOME = {"x": 0, "y": 0, "heading": 0, "moving": False}
 
@@ -100,7 +100,7 @@ class ChaseRuleTests(unittest.TestCase):
 class RobotPollTests(unittest.TestCase):
     def test_a_reported_arrival_ends_the_chase_and_sends_the_robot_home(self) -> None:
         book = LobbyBook()
-        robot = RobotLink("t")
+        robot = PicoLink("t")
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         book.record_shakes(ada, 4)
@@ -111,7 +111,7 @@ class RobotPollTests(unittest.TestCase):
         self.assertEqual(robot.order(book)["mode"], "home")
 
     def test_home_needs_a_still_robot_near_the_center_facing_seat_0(self) -> None:
-        robot = RobotLink("t")
+        robot = PicoLink("t")
         book = LobbyBook()
         self.assertFalse(robot.at_home())
         robot.poll(book, HOME)
@@ -126,7 +126,7 @@ class RobotPollTests(unittest.TestCase):
         self.assertFalse(robot.at_home())
 
     def test_a_reset_changes_the_id_in_every_order(self) -> None:
-        robot = RobotLink("t")
+        robot = PicoLink("t")
         book = LobbyBook()
         robot.poll(book, dict(HOME, x=200))
         self.assertIsNone(robot.order(book)["reset"])

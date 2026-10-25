@@ -21,7 +21,7 @@ HOME_RADIUS_MM = 30.0
 HOME_HEADING_DEGREES = 10.0
 
 
-class RobotLink:
+class PicoLink:
     def __init__(self, token: str | None, mark_radius: float = MARK_RADIUS_MM) -> None:
         self.token = token or None
         self.mark_radius = mark_radius

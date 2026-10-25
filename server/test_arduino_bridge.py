@@ -7,7 +7,7 @@ import unittest
 import serial
 
 from server.app import create_app
-from server.bridge import Bridge, BridgeError, MoveResult
+from server.arduino_bridge import Bridge, BridgeError, MoveResult
 
 
 class FakePort:

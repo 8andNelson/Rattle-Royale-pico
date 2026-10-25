@@ -2,7 +2,7 @@
 
 Rattle Royale is a party game for phones, with a two-motor robot on the bench. The running game is a lobby and a 20-second shake contest. Players open a page from the laptop, enable shaking, and join a lobby of up to 8 people. Each player gets a seat and a floor mark. The creator starts the round. Everyone shakes. The highest shake count when the timer ends wins.
 
-During that round the server also keeps a fading pull score and picks who the robot would chase. Every phone shows that name. The robot does not move during a round. `server/bridge.py` can open the Arduino port, and nothing in a round sends it a move yet.
+During that round the server also keeps a fading pull score and picks who the robot would chase. Every phone shows that name. The robot does not move during a round. `server/arduino_bridge.py` can open the Arduino port, and nothing in a round sends it a move yet.
 
 The phones do not drive motors. The laptop runs the page, the lobby, the clock, the scores, and the chase line. Campus Wi-Fi often blocks a phone from opening the laptop’s own address, so phones use an ngrok HTTPS tunnel to that same server. iOS also requires HTTPS before it will share motion data.
 
@@ -22,7 +22,7 @@ The motion that would aim the robot is specified further down and is not in this
 | ngrok | Laptop, forwarding to port 8080 | Public HTTPS address for phones |
 | Motion planner | Same laptop | Not built. Later: aim and creep toward the live target |
 | Serial bridge | Same laptop, using pyserial | Opens `RATTLE_PORT` at startup, sends one command, and waits for the reply. A round does not send moves yet |
-| Firmware | Arduino | `firmware/dual_motor` accepts `SPIN`, `DRIVE`, `STOP`, and `PING`. `drive_test` rolls the car. `spin_test` turns it in place |
+| Firmware | Arduino | `arduino/dual_motor` accepts `SPIN`, `DRIVE`, `STOP`, and `PING`. `drive_test` rolls the car. `spin_test` turns it in place |
 
 ## Wireless robot (Pico W)
 
@@ -39,16 +39,16 @@ POST /api/robot  --HTTPS via ngrok-->      game server
 - The Pico polls `POST /api/robot` about every 300 ms on one kept-alive HTTPS connection, through the same ngrok address the phones use. Any Wi-Fi with internet works, including a phone hotspot. eduroam's enterprise login does not.
 - Every request needs `Authorization: Bearer <token>`. The token is `RATTLE_ROBOT_TOKEN` on the laptop and `ROBOT_TOKEN` in `pico/config.py`. With no token set, the robot endpoints answer 503.
 - The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), or `test` with a point set through `POST /api/robot/test`. `GET /api/robot/status` shows the last pose and the current order.
-- Marks sit on a circle of `MARK_RADIUS_MM` (250 mm, in `server/robot.py`). Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
+- Marks sit on a circle of `MARK_RADIUS_MM` (250 mm, in `server/pico_link.py`). Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
 - The Pico starts its pose at the center, pointed at seat 0, so it must be placed there before power-on. In `home` it drives back to the center and faces seat 0 on its own.
 - Every order carries a `reset` id. The lobby creator's **The robot is on the center mark** button changes it, and the robot then sets its pose back to the center facing seat 0. Use it after placing the robot by hand.
 - Core 1 does nothing but step the motors, so a slow HTTPS request on core 0 never stalls them. A move can be cut short at any step. The pose counts only the steps the wheels took, so a new order stops the move in flight and replans at once.
 - Without a good reply for 2 seconds, the robot holds still.
 
-`pico/brain.py` holds every decision: orders, arrival, home, reset, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulate.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
+`pico/brain.py` holds every decision: orders, arrival, home, reset, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulator.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
 
 ```text
-python pico/simulate.py --token <RATTLE_ROBOT_TOKEN> --speed 5
+python pico/simulator.py --token <RATTLE_ROBOT_TOKEN> --speed 5
 ```
 
 ### Chase round
@@ -69,22 +69,22 @@ At 3 ms per half-step and 38 mm wheels, the robot moves about 10 mm per second. 
 
 ## What already exists
 
-The phone game lives in `server/`. Start it from the project folder with `python -m server`. It serves the page at `/` and a WebSocket at `/ws`. `requirements.txt` includes `aiohttp` for that server and `pyserial` for the Arduino link. `server/bridge.py` is the only module that imports `pyserial`.
+The phone game lives in `server/`. Start it from the project folder with `python -m server`. It serves the page at `/` and a WebSocket at `/ws`. `requirements.txt` includes `aiohttp` for that server and `pyserial` for the Arduino link. `server/arduino_bridge.py` is the only module that imports `pyserial`.
 
-`server/lobby.py` assigns seats, locks each seat’s angle when the round starts, accepts shake totals, fades pull, and chooses the chase target. `server/test_lobby.py` and `server/test_pull.py` cover that. `server/test_bridge.py` covers the serial link with a fake port. The page in `server/app.py` shows the seat, the mark, the pull, and who would be chased. The winner is still the highest shake count.
+`server/lobby.py` assigns seats, locks each seat’s angle when the round starts, accepts shake totals, fades pull, and chooses the chase target. `server/test_lobby.py` and `server/test_pull.py` cover that. `server/test_arduino_bridge.py` covers the serial link with a fake port. The page in `server/app.py` shows the seat, the mark, the pull, and who would be chased. The winner is still the highest shake count.
 
 `ngrok.yml` points a public HTTPS address at `http://127.0.0.1:8080`. The phone page follows whatever address it was opened on, so the WebSocket uses the ngrok host when the page was opened through the tunnel.
 
-The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `firmware/dual_motor` accepts motion commands. The phone round does not send those commands yet. Set `RATTLE_PORT` to the board’s COM port before starting the server, and close the serial monitor first. The server keeps that port open. If the variable is unset, or the board does not answer, the server logs that the robot is offline and the lobby still runs.
+The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `arduino/dual_motor` accepts motion commands. The phone round does not send those commands yet. Set `RATTLE_PORT` to the board’s COM port before starting the server, and close the serial monitor first. The server keeps that port open. If the variable is unset, or the board does not answer, the server logs that the robot is offline and the lobby still runs.
 
 - Motor 1 uses Arduino pins 4, 5, 6, and 7.
 - Motor 2 uses Arduino pins A0, A1, A2, and A3.
 - Both driver grounds share the Arduino ground. Driver VCC should come from an external 5V supply, because both motors draw current at the same time.
 - About 4096 half-steps is one revolution of a 28BYJ-48. At 3 ms per step, one wheel revolution takes about 12 seconds.
-- `firmware/motor_test` exercises one motor on pins A0–A3. `firmware/stepper_driver` exercises one motor on pins 8–11, which is an older single-motor wiring, not motor 1 on the car.
-- `firmware/drive_test` steps both car motors the same way and keeps going. On the bench, that rolls the car.
-- `firmware/spin_test` steps motor 1 forward and motor 2 backward, the opposite of the drive test, so the car turns in place.
-- `firmware/dual_motor` is the game sketch. At 115200 baud it reads `PING`, `STOP`, `SPIN`, and `DRIVE`, steps both motors on the same tick, waits 3 ms once per step, and releases the coils when the chunk ends. A step count is 1 through 16000. `DRIVE` with both motors in the same direction is the roll. `SPIN` runs them in opposite directions. Which way positive `SPIN` points relative to seat 0 is not written down yet.
+- `arduino/motor_test` exercises one motor on pins A0–A3. `arduino/stepper_driver` exercises one motor on pins 8–11, which is an older single-motor wiring, not motor 1 on the car.
+- `arduino/drive_test` steps both car motors the same way and keeps going. On the bench, that rolls the car.
+- `arduino/spin_test` steps motor 1 forward and motor 2 backward, the opposite of the drive test, so the car turns in place.
+- `arduino/dual_motor` is the game sketch. At 115200 baud it reads `PING`, `STOP`, `SPIN`, and `DRIVE`, steps both motors on the same tick, waits 3 ms once per step, and releases the coils when the chunk ends. A step count is 1 through 16000. `DRIVE` with both motors in the same direction is the roll. `SPIN` runs them in opposite directions. Which way positive `SPIN` points relative to seat 0 is not written down yet.
 
 ## How a round feels
 
@@ -93,7 +93,7 @@ The robot hardware is two 28BYJ-48 steppers, each on its own ULN2003 driver. `fi
 3. The creator taps **Start game**. A 20-second countdown runs from the server’s end time. Seat numbers lock, and each seat gets the angle it will keep for the round.
 4. Shakes add to that player’s score only while the countdown is running. The same shakes add pull. Pull fades while the round is open, and the phone with the strongest pull is the one the robot would chase. The list on every phone shows the same scores and pull. The personal shake total is hidden on the join screen and appears once the round has started.
 5. At zero, the highest shake count wins. If several players share that score, all of their names are shown. Pull is not the winner. The leave button is hidden during the 20 seconds and comes back with the result.
-6. Leaving the lobby removes that player and sets their phone’s shake count back to 0. The same lobby does not start a second round. People create or join again for another game.
+6. Leaving the lobby removes that player and sets their phone’s shake count back to 0. After the result, the creator can tap **Rematch**. Everyone moves to a fresh lobby under a new code, with scores at 0 and seats packed again, and new players can join that code before the next start.
 
 One player is enough to start. The creator is the person who created the lobby. If they leave and someone is still in it, the next person in the list becomes the creator.
 
@@ -209,7 +209,7 @@ Each lobby moves through this sequence:
 1. **Lobby** — players join and leave. Shakes do not score.
 2. **Playing** — the 20-second window is open, shakes score, pull fades, the chase line is visible, and the leave button is hidden.
 3. **Result** — the shake-count winner is fixed, shakes no longer score, pull stays where it froze, and players can leave.
-4. The lobby ends when the last player leaves. A new round is a new lobby.
+4. The lobby ends when the last player leaves. The creator's **Rematch** opens the next round as a new lobby with the same players and a new code. The new code keeps the robot from mixing an arrival up between two rounds.
 
 ## Later: robot motion
 
@@ -457,7 +457,7 @@ The planner never reads accelerometers and never computes pull. The server hands
 
 ## Serial bridge
 
-`server/bridge.py` is the only code that opens the Arduino port. It uses pyserial. One thread reads and writes that port, so a wait cannot freeze the phone server. The planner is not calling it yet. When it does, it will hand the bridge one chunk at a time and wait for completion before the next, so a drive cannot start on top of a spin.
+`server/arduino_bridge.py` is the only code that opens the Arduino port. It uses pyserial. One thread reads and writes that port, so a wait cannot freeze the phone server. The planner is not calling it yet. When it does, it will hand the bridge one chunk at a time and wait for completion before the next, so a drive cannot start on top of a spin.
 
 ### Port
 
@@ -509,7 +509,7 @@ The bridge does not compute angles, store pull, or choose motor pins. A spin of 
 
 ## Firmware
 
-`firmware/dual_motor` is the game sketch. `firmware/drive_test` and `firmware/spin_test` are the two-motor bench sketches: same direction rolls, opposite directions turn in place. `firmware/motor_test` and `firmware/stepper_driver` stay as single-motor tests. The game sketch keeps the existing motor model:
+`arduino/dual_motor` is the game sketch. `arduino/drive_test` and `arduino/spin_test` are the two-motor bench sketches: same direction rolls, opposite directions turn in place. `arduino/motor_test` and `arduino/stepper_driver` stay as single-motor tests. The game sketch keeps the existing motor model:
 
 - The same 8-phase half-step sequence.
 - Motor 1 on pins 4–7, motor 2 on pins A0–A3.
@@ -525,8 +525,8 @@ The bridge does not compute angles, store pull, or choose motor pins. A spin of 
 
 Behavior of each command:
 
-- **SPIN.** For each step, advance motor 1 by `direction` and motor 2 by the opposite direction, then wait the step delay. That pairing is what `firmware/spin_test` uses. Positive `direction` still has to be matched to the floor, toward higher seat numbers, and written into the sketch comment.
-- **DRIVE.** For each step, advance both motors by `direction`, then wait the step delay. Both motors in direction `1` is what `firmware/drive_test` uses, and that rolls the car.
+- **SPIN.** For each step, advance motor 1 by `direction` and motor 2 by the opposite direction, then wait the step delay. That pairing is what `arduino/spin_test` uses. Positive `direction` still has to be matched to the floor, toward higher seat numbers, and written into the sketch comment.
+- **DRIVE.** For each step, advance both motors by `direction`, then wait the step delay. Both motors in direction `1` is what `arduino/drive_test` uses, and that rolls the car.
 - **STOP.** Break out of the current step loop, release both coil sets, and print `DONE STOP`.
 - **PING.** Print `PONG` when idle. During a move, a ping can wait. Stop takes priority over ping.
 
@@ -596,8 +596,8 @@ Done:
 3. **Shake score.** Permission, counting on the phone, totals into the server, a 20-second clock, and a winner by shake count.
 4. **Seats.** Assign a seat and a floor mark, pack seats until the start, then lock the angles.
 5. **Fading pull.** Turn accepted shakes into a score that drops when someone stops, and show who the robot would chase.
-6. **Firmware commands.** `firmware/dual_motor` runs `SPIN`, `DRIVE`, `STOP`, and `PING`, and the `DONE` reply echoes the step count and direction.
-7. **Serial bridge.** `server/bridge.py` opens `RATTLE_PORT`, sends one command, and waits for `DONE` or a timeout. A round does not call it yet.
+6. **Firmware commands.** `arduino/dual_motor` runs `SPIN`, `DRIVE`, `STOP`, and `PING`, and the `DONE` reply echoes the step count and direction.
+7. **Serial bridge.** `server/arduino_bridge.py` opens `RATTLE_PORT`, sends one command, and waits for `DONE` or a timeout. A round does not call it yet.
 
 Still to build, so the robot actually follows that target:
 

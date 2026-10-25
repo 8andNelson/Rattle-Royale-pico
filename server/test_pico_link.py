@@ -6,18 +6,18 @@ from aiohttp.test_utils import AioHTTPTestCase
 
 from server.app import create_app
 from server.lobby import LobbyBook
-from server.robot import RobotLink, mark_position
+from server.pico_link import PicoLink, mark_position
 
 
 class OrderTests(unittest.TestCase):
     def test_no_round_sends_the_robot_home(self) -> None:
-        self.assertEqual(RobotLink("t").order(LobbyBook()), {"mode": "home", "reset": None})
+        self.assertEqual(PicoLink("t").order(LobbyBook()), {"mode": "home", "reset": None})
 
     def test_an_open_round_with_no_pull_holds(self) -> None:
         book = LobbyBook()
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
-        self.assertEqual(RobotLink("t").order(book), {"mode": "hold", "round": code, "reset": None})
+        self.assertEqual(PicoLink("t").order(book), {"mode": "hold", "round": code, "reset": None})
 
     def test_the_chased_seat_becomes_a_point_on_the_circle(self) -> None:
         book = LobbyBook()
@@ -27,7 +27,7 @@ class OrderTests(unittest.TestCase):
         book.join(code, "Di")
         book.start(ada, chase=True)
         book.record_shakes(bea, 4)
-        order = RobotLink("t", mark_radius=200).order(book)
+        order = PicoLink("t", mark_radius=200).order(book)
         self.assertEqual(order["mode"], "chase")
         self.assertEqual(order["seat"], 1)
         self.assertEqual(order["name"], "Bea")
@@ -36,7 +36,7 @@ class OrderTests(unittest.TestCase):
 
     def test_a_test_point_is_used_only_without_a_round(self) -> None:
         book = LobbyBook()
-        robot = RobotLink("t")
+        robot = PicoLink("t")
         robot.set_test_point({"x": 100, "y": -50})
         self.assertEqual(robot.order(book), {"mode": "test", "x": 100.0, "y": -50.0, "reset": None})
         ada, code = book.create("Ada")
@@ -46,7 +46,7 @@ class OrderTests(unittest.TestCase):
         self.assertIsNone(robot.test_point)
 
     def test_a_poll_keeps_the_pose_and_reports_each_arrival_once(self) -> None:
-        robot = RobotLink("t")
+        robot = PicoLink("t")
         book = LobbyBook()
         report = {"x": 1, "y": 2, "heading": 90, "moving": True, "arrived": {"round": "ABCD", "seat": 2}}
         _, first = robot.poll(book, report, now=10)

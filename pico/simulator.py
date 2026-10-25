@@ -6,9 +6,9 @@ so a whole chase can be played before the hardware exists.
 
 From the project folder, with the server running and RATTLE_ROBOT_TOKEN set:
 
-  python pico/simulate.py
-  python pico/simulate.py --speed 5
-  python pico/simulate.py --url https://petroleum-guy-whenever.ngrok-free.dev
+  python pico/simulator.py
+  python pico/simulator.py --speed 5
+  python pico/simulator.py --url https://petroleum-guy-whenever.ngrok-free.dev
 
 --speed runs the wheels that many times faster than the real motors.
 """
@@ -108,7 +108,7 @@ class SimWlan:
 
 
 class HttpLink:
-    """Same calls as link.Link, on Python's http.client. Keeps one connection."""
+    """Same calls as wifi_link.Link, on Python's http.client. Keeps one connection."""
 
     def __init__(self, url, token, timeout_s=3):
         parts = urlsplit(url)

@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from brain import Brain  # noqa: E402
 from server.app import create_app  # noqa: E402
-from simulate import HttpLink, SimWheels, SimWlan, settings  # noqa: E402
+from simulator import HttpLink, SimWheels, SimWlan, settings  # noqa: E402
 
 TOKEN = "game-test"
 

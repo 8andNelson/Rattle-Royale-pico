@@ -6,7 +6,7 @@ is where the pose starts. brain.py has the rules it follows.
 
 import config
 from brain import Brain
-from link import Link, start_wifi
+from wifi_link import Link, start_wifi
 from stepper import Wheels
 
 

@@ -1,7 +1,7 @@
 """The robot's decisions, apart from any hardware.
 
 main.py runs this on the Pico W with real wheels, Wi-Fi, and HTTPS.
-simulate.py runs the same code on the laptop with pretend wheels, so the whole
+simulator.py runs the same code on the laptop with pretend wheels, so the whole
 game can be played before the robot exists.
 
 The server says what to do on every poll:

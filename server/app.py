@@ -13,9 +13,9 @@ import time
 
 from aiohttp import ClientConnectionError, WSMsgType, web
 
-from server.bridge import Bridge
+from server.arduino_bridge import Bridge
 from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
-from server.robot import RobotLink
+from server.pico_link import PicoLink
 
 HOST = "0.0.0.0"
 PORT = 8080
@@ -107,6 +107,7 @@ PAGE = """<!DOCTYPE html>
       <p id="result" hidden></p>
       <button id="start" type="button" hidden>Start game</button>
       <button id="robot-home" type="button" hidden>The robot is on the center mark</button>
+      <button id="rematch" type="button" hidden>Rematch</button>
       <p id="waiting" hidden>Waiting for the creator to start</p>
       <button id="leave" type="button">Leave lobby</button>
     </section>
@@ -265,7 +266,12 @@ PAGE = """<!DOCTYPE html>
         ? "Chase round. Get the robot to reach you."
         : "Shake contest. Most shakes wins.";
       drawArena(message);
-      document.getElementById("waiting").hidden = message.creator || message.started;
+      document.getElementById("rematch").hidden = !(message.creator && message.finished);
+      const waiting = document.getElementById("waiting");
+      waiting.hidden = message.creator || (message.started && !message.finished);
+      waiting.textContent = message.finished
+        ? "Waiting for the creator to start a rematch"
+        : "Waiting for the creator to start";
       document.getElementById("leave").hidden = playing;
       const mine = message.players.find((player) => player.you);
       document.getElementById("your-seat").textContent = mine ? "You are seat " + mine.seat : "";
@@ -347,6 +353,9 @@ PAGE = """<!DOCTYPE html>
     });
     document.getElementById("start").addEventListener("click", () => {
       send({ type: "start" });
+    });
+    document.getElementById("rematch").addEventListener("click", () => {
+      send({ type: "rematch" });
     });
     document.getElementById("robot-home").addEventListener("click", () => {
       send({ type: "robot_home" });
@@ -618,7 +627,7 @@ def create_app(robot_token: str | None = None) -> web.Application:
     app["book"] = LobbyBook()
     app["sockets"] = {}
     app["bridge"] = Bridge()
-    app["robot"] = RobotLink(robot_token)
+    app["robot"] = PicoLink(robot_token)
     app.on_startup.append(start_watch)
     app.on_cleanup.append(stop_watch)
     app.on_cleanup.append(close_bridge)
@@ -690,7 +699,7 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
             book.check_start(player_id)
-            robot: RobotLink = app["robot"]
+            robot: PicoLink = app["robot"]
             chase = robot.online()
             if chase and book.robot_round() is not None:
                 raise LobbyError("The robot is busy with another lobby's chase.")
@@ -701,6 +710,12 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             await broadcast(app, code)
             app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
             app.setdefault("pull_tasks", {})[code] = asyncio.create_task(fade_pull(app, code))
+        elif kind == "rematch":
+            if player_id is None:
+                raise LobbyError("You are not in a lobby.")
+            code = book.rematch(player_id)
+            log.info("rematch opened as lobby %s", code)
+            await broadcast(app, code)
         elif kind == "shakes":
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
@@ -728,8 +743,8 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
     return player_id
 
 
-def robot_link(request: web.Request) -> RobotLink:
-    robot: RobotLink = request.app["robot"]
+def robot_link(request: web.Request) -> PicoLink:
+    robot: PicoLink = request.app["robot"]
     if not robot.enabled:
         raise web.HTTPServiceUnavailable(text="The robot link is off. Set RATTLE_ROBOT_TOKEN.")
     if not robot.authorized(request.headers.get("Authorization")):
@@ -762,7 +777,7 @@ async def robot_poll(request: web.Request) -> web.Response:
 async def robot_changed(app: web.Application) -> None:
     """Every lobby hears when the robot comes, goes, or gets home. The open
     chase also hears every new pose."""
-    robot: RobotLink = app["robot"]
+    robot: PicoLink = app["robot"]
     book: LobbyBook = app["book"]
     state = (robot.online(), robot.at_home())
     if state != app.get("robot_state"):
