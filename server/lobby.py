@@ -1,6 +1,8 @@
 """Open lobbies. A lobby holds a code and up to eight named players.
 
-The creator can start a 20-second click game. The highest count wins.
+Each player gets a seat on a circle. Seats pack until the round starts, then
+lock, and each seat keeps the angle it had at the start. The creator can start
+a 20-second shake game. The highest shake count wins.
 """
 
 import secrets
@@ -9,6 +11,8 @@ from dataclasses import dataclass
 
 MAX_PLAYERS = 8
 ROUND_SECONDS = 20
+MAX_SHAKE_JUMP = 12
+SCORE_GRACE_SECONDS = 0.5
 CODE_LENGTH = 4
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -23,7 +27,10 @@ class LobbyError(Exception):
 class Player:
     player_id: str
     name: str
-    clicks: int = 0
+    shakes: int = 0
+    accepted_shakes: int = 0
+    seat: int = 0
+    angle: float | None = None
 
 
 @dataclass
@@ -45,7 +52,7 @@ class LobbyBook:
         cleaned = clean_name(name)
         code = self._new_code()
         player_id = secrets.token_hex(8)
-        self._lobbies[code] = Lobby(code, player_id, [Player(player_id, cleaned)])
+        self._lobbies[code] = Lobby(code, player_id, [Player(player_id, cleaned, seat=0)])
         self._membership[player_id] = code
         return player_id, code
 
@@ -62,7 +69,7 @@ class LobbyBook:
         if any(player.name.casefold() == cleaned_name.casefold() for player in lobby.players):
             raise LobbyError("That name is already in this lobby.")
         player_id = secrets.token_hex(8)
-        lobby.players.append(Player(player_id, cleaned_name))
+        lobby.players.append(Player(player_id, cleaned_name, seat=len(lobby.players)))
         self._membership[player_id] = cleaned_code
         return player_id, cleaned_code
 
@@ -76,6 +83,9 @@ class LobbyBook:
         if not lobby.players:
             del self._lobbies[code]
             return None
+        if not lobby.started:
+            for index, player in enumerate(lobby.players):
+                player.seat = index
         if lobby.creator_id == player_id:
             lobby.creator_id = lobby.players[0].player_id
         return code
@@ -86,35 +96,44 @@ class LobbyBook:
             raise LobbyError("Only the creator can start.")
         if lobby.started:
             raise LobbyError("The game has already started.")
+        count = len(lobby.players)
+        for player in lobby.players:
+            player.angle = 360 * player.seat / count
         lobby.started = True
         lobby.ends_at = time.time() + ROUND_SECONDS
         return lobby.code
 
-    def click(self, player_id: str) -> tuple[str, bool]:
-        """Count one tap. Returns the lobby code and whether anyone should be updated."""
+    def record_shakes(self, player_id: str, total: object) -> tuple[str, bool]:
+        """Apply a phone's running shake total. Score moves only during the game."""
         lobby = self._lobby_for(player_id)
-        if not lobby.started:
-            raise LobbyError("The game has not started.")
-        if lobby.finished:
+        if not lobby.started or lobby.finished:
             return lobby.code, False
-        if lobby.ends_at is not None and time.time() >= lobby.ends_at:
+        if lobby.ends_at is not None and time.time() >= lobby.ends_at + SCORE_GRACE_SECONDS:
             lobby.finished = True
             return lobby.code, True
+        if type(total) is not int or total < 0:
+            raise LobbyError("That shake total could not be read.")
         player = next(player for player in lobby.players if player.player_id == player_id)
-        player.clicks += 1
+        if total <= player.accepted_shakes:
+            return lobby.code, False
+        increase = total - player.accepted_shakes
+        if increase > MAX_SHAKE_JUMP:
+            return lobby.code, False
+        player.accepted_shakes = total
+        player.shakes += increase
         return lobby.code, True
 
     def deadline(self, code: str) -> float | None:
         lobby = self._lobbies.get(code)
         if lobby is None or lobby.finished:
             return None
-        return lobby.ends_at
+        return lobby.ends_at + SCORE_GRACE_SECONDS
 
     def finish_if_due(self, code: str) -> bool:
         lobby = self._lobbies.get(code)
         if lobby is None or not lobby.started or lobby.finished:
             return False
-        if lobby.ends_at is None or time.time() < lobby.ends_at:
+        if lobby.ends_at is None or time.time() < lobby.ends_at + SCORE_GRACE_SECONDS:
             return False
         lobby.finished = True
         return True
@@ -137,12 +156,7 @@ class LobbyBook:
             "winners": winner_names(lobby) if lobby.finished else [],
             "creator": viewer_id == lobby.creator_id,
             "players": [
-                {
-                    "name": player.name,
-                    "you": player.player_id == viewer_id,
-                    "clicks": player.clicks,
-                }
-                for player in lobby.players
+                player_snapshot(player, viewer_id, lobby.started) for player in lobby.players
             ],
         }
 
@@ -159,9 +173,21 @@ class LobbyBook:
                 return code
 
 
+def player_snapshot(player: Player, viewer_id: str, started: bool) -> dict:
+    entry = {
+        "name": player.name,
+        "you": player.player_id == viewer_id,
+        "shakes": player.shakes,
+        "seat": player.seat,
+    }
+    if started:
+        entry["angle"] = player.angle
+    return entry
+
+
 def winner_names(lobby: Lobby) -> list[str]:
-    best = max(player.clicks for player in lobby.players)
-    return [player.name for player in lobby.players if player.clicks == best]
+    best = max(player.shakes for player in lobby.players)
+    return [player.name for player in lobby.players if player.shakes == best]
 
 
 def clean_name(name: object) -> str:

@@ -1,7 +1,8 @@
-"""Phone connection, lobbies, and a 20-second click game.
+"""Phone connection, lobbies, and a 20-second shake game.
 
-A phone can create or join a lobby of up to eight players. The creator starts
-the game. Each tap adds one to that player's count until the timer ends.
+A phone can create or join a lobby of up to eight players. Each player gets a
+seat and a floor mark. The creator starts the game. Shakes add to that
+player's score until the timer ends.
 """
 
 import asyncio
@@ -54,7 +55,6 @@ PAGE = """<!DOCTYPE html>
     }
     #clock { font-size: 2.5rem; margin: 0 0 0.5rem; }
     #result { font-size: 2rem; margin: 0 0 1rem; }
-    #tap { font-size: 2rem; padding: 2.2rem 0.85rem; }
     #error { min-height: 1.2rem; margin: 0; color: #ffb4b4; text-align: center; }
     #waiting { margin: 0 0 0.9rem; color: #aaa; }
     #lobby { text-align: center; }
@@ -64,30 +64,38 @@ PAGE = """<!DOCTYPE html>
       margin: 0 0 0.25rem;
     }
     #lobby-count { margin: 0 0 1rem; color: #aaa; }
+    #your-seat { font-size: 2rem; margin: 0 0 0.25rem; }
+    #your-mark { margin: 0 0 1rem; color: #aaa; }
     #players { list-style: none; padding: 0; margin: 0 0 1.25rem; font-size: 1.35rem; }
     #players li { padding: 0.35rem 0; }
+    #shakes { font-size: 1.6rem; margin: 0 0 0.4rem; text-align: center; }
+    #shake-note { margin: 0 0 0.9rem; color: #aaa; font-size: 0.95rem; text-align: center; }
   </style>
 </head>
 <body>
   <main>
     <p id="status">Connecting</p>
-    <section id="join">
+    <p id="shakes" hidden>Shakes: 0</p>
+    <button id="enable-shake" type="button">Enable shaking</button>
+    <p id="shake-note">Enable shaking to create or join a lobby.</p>
+    <section id="join" hidden>
       <label for="name">Name</label>
-      <input id="name" maxlength="20" autocomplete="nickname" enterkeyhint="done">
+      <input id="name" maxlength="20" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="done">
       <button id="create" type="button">Create lobby</button>
       <label for="code">Lobby code</label>
-      <input id="code" maxlength="4" autocapitalize="characters" autocomplete="off" enterkeyhint="go">
+      <input id="code" maxlength="4" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go">
       <button id="join-lobby" type="button">Join lobby</button>
     </section>
     <section id="lobby" hidden>
       <p id="lobby-code"></p>
       <p id="lobby-count"></p>
+      <p id="your-seat"></p>
+      <p id="your-mark"></p>
       <ul id="players"></ul>
       <p id="clock" hidden></p>
       <p id="result" hidden></p>
       <button id="start" type="button" hidden>Start game</button>
       <p id="waiting" hidden>Waiting for the creator to start</p>
-      <button id="tap" type="button" hidden>Tap</button>
       <button id="leave" type="button">Leave lobby</button>
     </section>
     <p id="error"></p>
@@ -102,7 +110,9 @@ PAGE = """<!DOCTYPE html>
 
     let socket = null;
     let inLobby = false;
+    let playing = false;
     let retryTimer = null;
+    let roundEndsAt = null;
     let countdownTimer = null;
 
     function stopCountdown() {
@@ -114,8 +124,12 @@ PAGE = """<!DOCTYPE html>
 
     function showJoin() {
       stopCountdown();
+      playing = false;
+      roundEndsAt = null;
+      resetShakes();
+      shakesEl.hidden = true;
       lobbyEl.hidden = true;
-      joinEl.hidden = false;
+      joinEl.hidden = !shaking;
     }
 
     function winnerText(winners) {
@@ -144,17 +158,25 @@ PAGE = """<!DOCTYPE html>
 
     function showLobby(message) {
       inLobby = true;
+      const nowPlaying = message.started && !message.finished;
+      if (nowPlaying && !playing) {
+        resetShakes();
+      }
+      playing = nowPlaying;
+      roundEndsAt = message.started ? message.ends_at : null;
+      shakesEl.hidden = !message.started;
       errorEl.textContent = "";
       joinEl.hidden = true;
       lobbyEl.hidden = false;
-      const playing = message.started && !message.finished;
       document.getElementById("lobby-code").textContent = message.code;
       document.getElementById("lobby-count").textContent =
         message.players.length + " of " + message.max;
       document.getElementById("start").hidden = !(message.creator && !message.started);
       document.getElementById("waiting").hidden = message.creator || message.started;
-      document.getElementById("tap").hidden = !playing;
       document.getElementById("leave").hidden = playing;
+      const mine = message.players.find((player) => player.you);
+      document.getElementById("your-seat").textContent = mine ? "You are seat " + mine.seat : "";
+      document.getElementById("your-mark").textContent = mine ? "Stand on mark " + mine.seat : "";
       const clock = document.getElementById("clock");
       const result = document.getElementById("result");
       if (playing) {
@@ -163,6 +185,10 @@ PAGE = """<!DOCTYPE html>
         result.textContent = "";
         runCountdown(message.ends_at);
       } else if (message.finished) {
+        if (mine) {
+          shakeCount = mine.shakes;
+          showShakeCount();
+        }
         stopCountdown();
         clock.hidden = true;
         result.hidden = false;
@@ -178,13 +204,17 @@ PAGE = """<!DOCTYPE html>
       message.players.forEach((player) => {
         const item = document.createElement("li");
         const marker = player.you ? " (you)" : "";
-        const clicks = message.started ? " — " + player.clicks : "";
-        item.textContent = player.name + marker + clicks;
+        const score = message.started ? " — " + player.shakes : "";
+        item.textContent = player.name + " — seat " + player.seat + marker + score;
         list.append(item);
       });
     }
 
     function send(message) {
+      if ((message.type === "create" || message.type === "join") && !shaking) {
+        errorEl.textContent = "Enable shaking before joining a lobby.";
+        return;
+      }
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         errorEl.textContent = "Still connecting.";
         return;
@@ -194,28 +224,208 @@ PAGE = """<!DOCTYPE html>
     }
 
     document.getElementById("create").addEventListener("click", () => {
-      send({ type: "create", name: nameEl.value });
+      send({ type: "create", name: nameEl.value, shaking: true });
     });
     document.getElementById("join-lobby").addEventListener("click", () => {
-      send({ type: "join", name: nameEl.value, code: codeEl.value });
+      send({ type: "join", name: nameEl.value, code: codeEl.value, shaking: true });
     });
     document.getElementById("start").addEventListener("click", () => {
       send({ type: "start" });
     });
-    document.getElementById("tap").addEventListener("click", () => {
-      send({ type: "click" });
-    });
     document.getElementById("leave").addEventListener("click", () => {
       send({ type: "leave" });
     });
+
+    const SHAKE_THRESHOLD = 15;
+    const SHAKE_GAP_MS = 150;
+    const shakesEl = document.getElementById("shakes");
+    const enableShakeEl = document.getElementById("enable-shake");
+    const shakeNoteEl = document.getElementById("shake-note");
+    let shakeCount = 0;
+    let shaking = false;
+    let lastShakeAt = 0;
+
+    function resetShakes() {
+      shakeCount = 0;
+      lastShakeAt = 0;
+      showShakeCount();
+    }
+
+    function showShakeCount() {
+      shakesEl.textContent = "Shakes: " + shakeCount;
+    }
+
+    function dismissKeyboard() {
+      nameEl.blur();
+      codeEl.blur();
+      const active = document.activeElement;
+      if (active && active !== document.body && active.blur) {
+        active.blur();
+      }
+    }
+
+    function replaceRange(input, text) {
+      const start = input.selectionStart == null ? input.value.length : input.selectionStart;
+      const end = input.selectionEnd == null ? input.value.length : input.selectionEnd;
+      const next = (input.value.slice(0, start) + text + input.value.slice(end)).slice(0, input.maxLength || undefined);
+      input.value = next;
+      const caret = Math.min(start + text.length, input.value.length);
+      input.setSelectionRange(caret, caret);
+    }
+
+    function deleteRange(input, backward) {
+      const start = input.selectionStart == null ? input.value.length : input.selectionStart;
+      const end = input.selectionEnd == null ? input.value.length : input.selectionEnd;
+      if (start !== end) {
+        input.value = input.value.slice(0, start) + input.value.slice(end);
+        input.setSelectionRange(start, start);
+        return;
+      }
+      if (backward && start > 0) {
+        input.value = input.value.slice(0, start - 1) + input.value.slice(end);
+        input.setSelectionRange(start - 1, start - 1);
+      } else if (!backward && end < input.value.length) {
+        input.value = input.value.slice(0, start) + input.value.slice(end + 1);
+        input.setSelectionRange(start, start);
+      }
+    }
+
+    function watchTyping(input) {
+      let handledByKey = false;
+      input.addEventListener("pointerdown", () => {
+        input.readOnly = false;
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.metaKey || event.ctrlKey || event.altKey) {
+          return;
+        }
+        if (event.key === "Enter") {
+          event.preventDefault();
+          return;
+        }
+        if (event.key === "Backspace" || event.key === "Delete") {
+          event.preventDefault();
+          handledByKey = true;
+          deleteRange(input, event.key === "Backspace");
+          return;
+        }
+        if (event.key.length === 1) {
+          event.preventDefault();
+          handledByKey = true;
+          replaceRange(input, event.key);
+        }
+      });
+      input.addEventListener("beforeinput", (event) => {
+        if (event.inputType === "historyUndo" || event.inputType === "historyRedo" || event.inputType === "insertLineBreak") {
+          event.preventDefault();
+          handledByKey = false;
+          return;
+        }
+        if (handledByKey) {
+          event.preventDefault();
+          handledByKey = false;
+          return;
+        }
+        if (event.inputType === "insertText" || event.inputType === "insertFromPaste") {
+          event.preventDefault();
+          if (event.data) {
+            replaceRange(input, event.data);
+          }
+          return;
+        }
+        if (event.inputType === "deleteContentBackward" || event.inputType === "deleteContentForward") {
+          event.preventDefault();
+          deleteRange(input, event.inputType === "deleteContentBackward");
+        }
+      });
+    }
+
+    watchTyping(nameEl);
+    watchTyping(codeEl);
+
+    function onMotion(event) {
+      if (!shaking || !playing || document.visibilityState === "hidden") {
+        return;
+      }
+      if (roundEndsAt !== null && Date.now() >= roundEndsAt) {
+        return;
+      }
+      const reading = event.accelerationIncludingGravity;
+      if (!reading || reading.x == null || reading.y == null || reading.z == null) {
+        shakeNoteEl.textContent = "This phone cannot shake.";
+        return;
+      }
+      const strength = Math.hypot(reading.x, reading.y, reading.z);
+      if (strength < SHAKE_THRESHOLD) {
+        return;
+      }
+      nameEl.readOnly = true;
+      codeEl.readOnly = true;
+      dismissKeyboard();
+      const now = performance.now();
+      if (now - lastShakeAt < SHAKE_GAP_MS) {
+        return;
+      }
+      lastShakeAt = now;
+      shakeCount += 1;
+      showShakeCount();
+      send({ type: "shakes", total: shakeCount });
+    }
+
+    async function enableShaking() {
+      const motion = window.DeviceMotionEvent;
+      if (!motion) {
+        enableShakeEl.hidden = true;
+        shakeNoteEl.textContent = "This phone cannot shake.";
+        return;
+      }
+      if (typeof motion.requestPermission === "function" && !window.isSecureContext) {
+        shakeNoteEl.textContent = "Open the https link to enable shaking.";
+        return;
+      }
+      try {
+        if (typeof motion.requestPermission === "function") {
+          const result = await motion.requestPermission();
+          if (result !== "granted") {
+            shakeNoteEl.textContent = "Shaking is off.";
+            return;
+          }
+        }
+      } catch (error) {
+        shakeNoteEl.textContent = "Shaking is off.";
+        return;
+      }
+      if (shaking) {
+        return;
+      }
+      window.addEventListener("devicemotion", onMotion);
+      shaking = true;
+      nameEl.readOnly = true;
+      codeEl.readOnly = true;
+      enableShakeEl.hidden = true;
+      dismissKeyboard();
+      shakeNoteEl.textContent = "Shaking is on.";
+      if (!inLobby) {
+        joinEl.hidden = false;
+      }
+    }
+
+    document.getElementById("enable-shake").addEventListener("click", () => {
+      enableShaking();
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") {
+        lastShakeAt = 0;
+      }
+    });
     nameEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
-        send({ type: "create", name: nameEl.value });
+        send({ type: "create", name: nameEl.value, shaking: true });
       }
     });
     codeEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
-        send({ type: "join", name: nameEl.value, code: codeEl.value });
+        send({ type: "join", name: nameEl.value, code: codeEl.value, shaking: true });
       }
     });
 
@@ -332,6 +542,8 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
     book: LobbyBook = app["book"]
     try:
         if kind in ("create", "join"):
+            if payload.get("shaking") is not True:
+                raise LobbyError("Enable shaking before joining a lobby.")
             if kind == "create":
                 new_id, code = book.create(payload.get("name"))
             else:
@@ -350,10 +562,10 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             log.info("lobby %s started", code)
             await broadcast(app, code)
             app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
-        elif kind == "click":
+        elif kind == "shakes":
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
-            code, changed = book.click(player_id)
+            code, changed = book.record_shakes(player_id, payload.get("total"))
             if changed:
                 await broadcast(app, code)
         elif kind == "leave":
