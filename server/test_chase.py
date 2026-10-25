@@ -6,7 +6,7 @@ from aiohttp.test_utils import AioHTTPTestCase
 
 from server.app import create_app
 from server.lobby import CHASE_ROUND_SECONDS, ROUND_SECONDS, LobbyBook
-from server.pico_link import PicoLink
+from server.pico_link import CELEBRATE_SECONDS, PicoLink
 
 HOME = {"x": 0, "y": 0, "heading": 0, "moving": False}
 
@@ -98,17 +98,18 @@ class ChaseRuleTests(unittest.TestCase):
 
 
 class RobotPollTests(unittest.TestCase):
-    def test_a_reported_arrival_ends_the_chase_and_sends_the_robot_home(self) -> None:
+    def test_a_reported_arrival_ends_the_chase_wiggles_then_sends_the_robot_home(self) -> None:
         book = LobbyBook(chase_countdown=0)
         robot = PicoLink("t")
         ada, code = book.create("Ada")
         book.start(ada, chase=True)
         book.record_shakes(ada, 4)
         self.assertEqual(robot.order(book)["mode"], "chase")
-        _, arrival = robot.poll(book, dict(HOME, arrived={"round": code, "seat": 0}))
+        order, arrival = robot.poll(book, dict(HOME, arrived={"round": code, "seat": 0}), now=100)
         self.assertTrue(arrival["won"])
         self.assertEqual(book.snapshot(code, ada)["reason"], "arrival")
-        self.assertEqual(robot.order(book)["mode"], "home")
+        self.assertEqual(order["mode"], "celebrate")
+        self.assertEqual(robot.order(book, now=100 + CELEBRATE_SECONDS + 0.1)["mode"], "home")
 
     def test_home_needs_a_still_robot_near_the_center_facing_seat_0(self) -> None:
         robot = PicoLink("t")

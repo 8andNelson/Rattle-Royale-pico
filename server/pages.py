@@ -1,5 +1,5 @@
-"""The HTML the game server serves: the phone page, the big screen, and the arena
-both of them draw."""
+"""The HTML the game server serves: the phone page, the big screen, the robot
+panel, and the arena all three draw."""
 
 PAGE = """<!DOCTYPE html>
 <html lang="en">
@@ -195,6 +195,9 @@ PAGE = """<!DOCTYPE html>
       }
       if (robot.halted) {
         return "Robot stopped by a host";
+      }
+      if (robot.manual && !message.started) {
+        return "Robot in manual control from the robot panel";
       }
       if (message.started) {
         return "Robot online";
@@ -917,6 +920,266 @@ SCREEN = """<!DOCTYPE html>
     clockTimer = setInterval(tickClock, 200);
     document.getElementById("pick").hidden = Boolean(watching);
     connect();
+  </script>
+</body>
+</html>
+"""
+
+
+ROBOT_PANEL = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot Panel</title>
+  <style>
+    body { margin: 0; background: #111; color: #f4f4f4; font-family: sans-serif; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(18rem, 1fr);
+      gap: 1.5rem;
+      padding: 1.5rem;
+      box-sizing: border-box;
+      max-width: 70rem;
+      margin: 0 auto;
+    }
+    @media (max-width: 46rem) {
+      main { grid-template-columns: 1fr; padding: 1rem; }
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 0.75rem; }
+    h2 { font-size: 1rem; color: #aaa; margin: 1.25rem 0 0.5rem; font-weight: normal; }
+    #arena { display: block; width: 100%; max-width: 28rem; margin: 0 auto; }
+    dl { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 1rem; margin: 0; }
+    dt { color: #aaa; }
+    dd { margin: 0; font-variant-numeric: tabular-nums; }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    button, input, select { font: inherit; padding: 0.55rem 0.75rem; }
+    input[type=number] { width: 6rem; }
+    #token-form input { flex: 1; min-width: 10rem; }
+    #token-form[hidden] { display: none; }
+    #stop { background: #b22; color: #fff; border: none; }
+    #message { min-height: 1.3rem; color: #ffd24a; margin: 0.75rem 0 0; }
+    #message.bad { color: #ffb4b4; }
+    .on { color: #8f8; }
+    .off { color: #f88; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Robot panel</h1>
+      <svg id="arena" viewBox="-130 -130 260 260"></svg>
+      <div class="row">
+        <label for="seats">Marks on the floor</label>
+        <select id="seats"></select>
+      </div>
+    </section>
+    <section>
+      <form id="token-form" class="row">
+        <input id="token" type="password" autocomplete="off" placeholder="Robot token (RATTLE_ROBOT_TOKEN)" aria-label="Robot token">
+        <button type="submit">Use token</button>
+      </form>
+      <dl>
+        <dt>Link</dt><dd id="link">Waiting for the token</dd>
+        <dt>Order</dt><dd id="order">-</dd>
+        <dt>Pose</dt><dd id="pose">-</dd>
+        <dt>Control</dt><dd id="control">-</dd>
+        <dt>Wi-Fi signal</dt><dd id="rssi">-</dd>
+        <dt>Poll time</dt><dd id="latency">-</dd>
+        <dt>Free memory</dt><dd id="memory">-</dd>
+        <dt>Up for</dt><dd id="uptime">-</dd>
+        <dt>Boots seen</dt><dd id="boots">-</dd>
+      </dl>
+
+      <h2>Safety</h2>
+      <div class="row">
+        <button id="stop" type="button">Stop the robot</button>
+        <button type="button" data-action="resume">Resume</button>
+        <button type="button" data-action="reset">It is on the center mark</button>
+      </div>
+
+      <h2>Manual control</h2>
+      <div class="row">
+        <button type="button" data-action="manual" data-on="true">Take control</button>
+        <button type="button" data-action="home">Hand back and drive home</button>
+      </div>
+
+      <h2>Jog</h2>
+      <div class="row">
+        <button type="button" data-jog="drive" data-amount="100">Forward 100 mm</button>
+        <button type="button" data-jog="drive" data-amount="-100">Back 100 mm</button>
+      </div>
+      <div class="row" style="margin-top: 0.5rem">
+        <button type="button" data-jog="spin" data-amount="90">Left 90°</button>
+        <button type="button" data-jog="spin" data-amount="-90">Right 90°</button>
+        <button type="button" data-jog="spin" data-amount="360">Full turn</button>
+      </div>
+      <form id="custom" class="row" style="margin-top: 0.5rem">
+        <select id="custom-kind" aria-label="Jog kind">
+          <option value="drive">Drive mm</option>
+          <option value="spin">Spin degrees</option>
+        </select>
+        <input id="custom-amount" type="number" step="any" value="200" aria-label="Jog amount">
+        <button type="submit">Jog</button>
+      </form>
+
+      <h2>Go to a mark</h2>
+      <div class="row" id="marks"></div>
+      <p id="message"></p>
+    </section>
+  </main>
+  <script src="/arena.js"></script>
+  <script>
+    const TOKEN_KEY = "rattle-robot-token";
+    const SEATS_KEY = "rattle-robot-seats";
+    let token = "";
+    let seats = 4;
+    let last = null;
+    const messageEl = document.getElementById("message");
+
+    try {
+      token = localStorage.getItem(TOKEN_KEY) || "";
+      seats = Number(localStorage.getItem(SEATS_KEY)) || 4;
+    } catch (error) {
+      // Without storage the token is asked for on every visit.
+    }
+
+    function say(text, bad) {
+      messageEl.textContent = text;
+      messageEl.className = bad ? "bad" : "";
+    }
+
+    function headers() {
+      return { "Authorization": "Bearer " + token, "Content-Type": "application/json" };
+    }
+
+    async function call(body) {
+      if (!token) {
+        say("Enter the robot token first.", true);
+        return;
+      }
+      const response = await fetch("/api/robot/control", { method: "POST", headers: headers(), body: JSON.stringify(body) });
+      const text = await response.text();
+      if (!response.ok) {
+        say(text || "That did not work.", true);
+        return;
+      }
+      say("Sent: " + body.action + (body.kind ? " " + body.kind + " " + body.amount : ""), false);
+      show(JSON.parse(text));
+    }
+
+    function drawMarks() {
+      const select = document.getElementById("seats");
+      select.replaceChildren();
+      for (let count = 1; count <= 8; count++) {
+        const option = document.createElement("option");
+        option.value = count;
+        option.textContent = count;
+        option.selected = count === seats;
+        select.append(option);
+      }
+      const marks = document.getElementById("marks");
+      marks.replaceChildren();
+      for (let seat = 0; seat < seats; seat++) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Mark " + seat;
+        button.addEventListener("click", () => call({ action: "goto_seat", seat: seat, count: seats }));
+        marks.append(button);
+      }
+    }
+
+    function show(status) {
+      last = status;
+      const link = document.getElementById("link");
+      link.textContent = status.online ? "Online" : status.seen_seconds_ago == null ? "Never seen" : "Offline, last seen " + status.seen_seconds_ago + " s ago";
+      link.className = status.online ? "on" : "off";
+      const order = status.order || {};
+      document.getElementById("order").textContent = order.mode + (order.name ? " " + order.name : "") + (order.kind ? " " + order.kind + " " + order.amount : "");
+      const pose = status.pose;
+      document.getElementById("pose").textContent = pose
+        ? "x " + pose.x.toFixed(0) + " mm, y " + pose.y.toFixed(0) + " mm, heading " + pose.heading.toFixed(0) + "°" + (pose.moving ? ", moving" : "") + (status.home ? ", home" : "")
+        : "unknown";
+      document.getElementById("control").textContent = status.halted ? "Stopped" : status.manual ? "Manual" : "Game";
+      const health = status.health || {};
+      document.getElementById("rssi").textContent = health.rssi == null ? "-" : health.rssi + " dBm";
+      document.getElementById("latency").textContent = health.latency_ms == null ? "-" : health.latency_ms + " ms";
+      document.getElementById("memory").textContent = health.mem_free == null ? "-" : Math.round(health.mem_free / 1024) + " KB";
+      document.getElementById("uptime").textContent = health.uptime_s == null ? "-" : Math.floor(health.uptime_s / 60) + " min " + (health.uptime_s % 60) + " s";
+      document.getElementById("boots").textContent = status.boots + (status.restoring ? " (restoring the last pose)" : "");
+      const players = [];
+      for (let seat = 0; seat < seats; seat++) {
+        players.push({ seat: seat, angle: (360 * seat) / seats, chased: order.mode === "chase" && order.seat === seat });
+      }
+      drawArena(document.getElementById("arena"), {
+        players: players,
+        robot: { online: status.online, pose: status.pose, radius: status.radius, halted: status.halted },
+      }, true);
+    }
+
+    async function refresh() {
+      if (!token) {
+        return;
+      }
+      try {
+        const response = await fetch("/api/robot/status", { headers: headers() });
+        if (response.status === 401 || response.status === 503) {
+          document.getElementById("token-form").hidden = false;
+          say(await response.text(), true);
+          return;
+        }
+        document.getElementById("token-form").hidden = true;
+        show(await response.json());
+      } catch (error) {
+        document.getElementById("link").textContent = "The server is not answering";
+      }
+    }
+
+    document.getElementById("token-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      token = document.getElementById("token").value.trim();
+      try {
+        localStorage.setItem(TOKEN_KEY, token);
+      } catch (error) {
+        // Kept for this visit only.
+      }
+      say("", false);
+      refresh();
+    });
+    document.getElementById("seats").addEventListener("change", (event) => {
+      seats = Number(event.target.value);
+      try {
+        localStorage.setItem(SEATS_KEY, String(seats));
+      } catch (error) {
+        // Kept for this visit only.
+      }
+      drawMarks();
+      if (last) {
+        show(last);
+      }
+    });
+    document.getElementById("stop").addEventListener("click", () => call({ action: "stop" }));
+    document.querySelectorAll("[data-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const body = { action: button.dataset.action };
+        if (button.dataset.on) {
+          body.on = button.dataset.on === "true";
+        }
+        call(body);
+      });
+    });
+    document.querySelectorAll("[data-jog]").forEach((button) => {
+      button.addEventListener("click", () => call({ action: "jog", kind: button.dataset.jog, amount: Number(button.dataset.amount) }));
+    });
+    document.getElementById("custom").addEventListener("submit", (event) => {
+      event.preventDefault();
+      call({ action: "jog", kind: document.getElementById("custom-kind").value, amount: Number(document.getElementById("custom-amount").value) });
+    });
+
+    document.getElementById("token-form").hidden = Boolean(token);
+    drawMarks();
+    refresh();
+    setInterval(refresh, 1000);
   </script>
 </body>
 </html>

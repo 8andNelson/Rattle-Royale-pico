@@ -11,6 +11,8 @@ The server says what to do on every poll:
   home   drive back to the center and face seat 0 (no chase is open)
   test   drive to a test point (no chase is open)
   stop   a host pressed stop; stay still until they resume
+  jog    one relative drive (mm) or spin (degrees), for calibration from /robot
+  celebrate  a short wiggle in place after the robot reached the winner
 
 Every order also carries a reset id. A new id means the host just placed the
 robot on the center mark, so the pose goes back to the center facing seat 0.
@@ -20,9 +22,15 @@ the pose counts only the steps the wheels really took. A lost link holds.
 
 Wi-Fi networks are tried in order. When one drops or never connects, the
 next one gets a turn.
+
+Every report carries a boot id and health numbers. After a reboot the server
+may send back the pose it last saw, which the robot takes only if it has not
+moved since it started. A brownout mid-game then does not lose its place.
 """
 
+import gc
 import math
+import random
 
 from navigation import Geometry, Pose, facing, toward
 
@@ -46,6 +54,11 @@ except ImportError:
 
 RECONNECT_MS = 10000
 _UNSEEN = object()
+
+# The victory wiggle: spins of DANCE_DEGREES times each factor. Every spin is a
+# whole multiple of the same step count, so the wiggle ends exactly where it began.
+DANCE_DEGREES = 20
+DANCE = (1, -2, 2, -2, 1)
 
 # LED patterns as (on ms, off ms) pairs, repeated.
 BLINKS = {
@@ -85,6 +98,8 @@ def goal_of(order):
         return ("chase", order.get("round"), order.get("seat"))
     if mode == "test":
         return ("test", order.get("x"), order.get("y"))
+    if mode in ("jog", "celebrate"):
+        return (mode, order.get("id"))
     return (mode,)
 
 
@@ -105,7 +120,15 @@ class Brain:
         self.arrival = None
         self.online = False
         self.reset_seen = _UNSEEN
+        self.boot = "%08x" % random.getrandbits(32)
+        self.moved = False
+        self.restored = False
+        self.latency_ms = None
+        self.jog_started = None
+        self.jog_done = None
+        self.dance = []
         now = ticks_ms()
+        self.started_at = now
         self.joined_at = now
         self.heard_at = now
         self.poll_at = now
@@ -116,7 +139,7 @@ class Brain:
             sleep_ms(10)
 
     def tick(self):
-        self.pose.advance(*self.wheels.take_steps(), self.geometry)
+        self._advance()
         self._talk()
         self._watch_link()
         current = goal_of(self.order)
@@ -124,9 +147,10 @@ class Brain:
             self.wheels.stop()
             self.goal = current
             self.arrival = None
+            self.dance = self._dance() if current[0] == "celebrate" else []
             self.log("New order:", self.order)
         if not self.wheels.busy():
-            self.pose.advance(*self.wheels.take_steps(), self.geometry)
+            self._advance()
             steps, reached = self.next_move()
             if reached is not None and self.arrival is None:
                 self.log("Reached seat", reached["seat"])
@@ -145,6 +169,12 @@ class Brain:
         if self.order.get("mode") == "stop":
             return "stopped"
         return "online"
+
+    def _advance(self):
+        left, right = self.wheels.take_steps()
+        if left or right:
+            self.moved = True
+            self.pose.advance(left, right, self.geometry)
 
     def next_move(self):
         """Returns (steps or None, arrival or None)."""
@@ -165,7 +195,29 @@ class Brain:
                 return toward(pose, 0, 0, self.geometry, align, max_spin, config.MAX_DRIVE_MM), None
             tolerance = math.radians(config.HOME_HEADING_DEGREES)
             return facing(pose, 0.0, self.geometry, tolerance, max_spin), None
+        if mode == "jog":
+            return self._jog(), None
+        if mode == "celebrate" and self.dance:
+            return self.dance.pop(0), None
         return None, None
+
+    def _dance(self):
+        left, right = self.geometry.spin_steps(math.radians(DANCE_DEGREES))
+        return [(left * factor, right * factor) for factor in DANCE]
+
+    def _jog(self):
+        """One relative move per jog id. The idle call after it marks it done."""
+        jog_id = self.order.get("id")
+        if jog_id is None or jog_id == self.jog_done:
+            return None
+        if jog_id != self.jog_started:
+            self.jog_started = jog_id
+            amount = self.order.get("amount") or 0
+            if self.order.get("kind") == "spin":
+                return self.geometry.spin_steps(math.radians(amount))
+            return self.geometry.drive_steps(amount)
+        self.jog_done = jog_id
+        return None
 
     def report(self):
         return {
@@ -174,6 +226,25 @@ class Brain:
             "heading": round(math.degrees(self.pose.heading), 1),
             "moving": self.wheels.busy(),
             "arrived": self.arrival,
+            "boot": self.boot,
+            "restored": self.restored,
+            "jog_done": self.jog_done,
+            "health": self.health(),
+        }
+
+    def health(self):
+        """Numbers for the /robot panel. Any that the board cannot give are None."""
+        rssi = None
+        try:
+            rssi = self.wlan.status("rssi")
+        except Exception:
+            pass
+        mem_free = getattr(gc, "mem_free", None)
+        return {
+            "uptime_s": ticks_diff(ticks_ms(), self.started_at) // 1000,
+            "latency_ms": self.latency_ms,
+            "rssi": rssi,
+            "mem_free": mem_free() if mem_free else None,
         }
 
     def _talk(self):
@@ -194,16 +265,19 @@ class Brain:
         if ticks_diff(now, self.poll_at) < 0:
             return
         self.poll_at = ticks_add(now, self.config.POLL_MS)
+        sent_at = ticks_ms()
         try:
             order = self.link.post("/api/robot", self.report())
         except Exception as error:
             self.log("Poll failed:", error)
             return
         self.heard_at = ticks_ms()
+        self.latency_ms = ticks_diff(self.heard_at, sent_at)
         if not self.online:
             self.log("Server reached from", self.wlan.ifconfig()[0])
             self.online = True
         self._apply_reset(order.get("reset"))
+        self._apply_restore(order.get("restore"))
         self.order = order
 
     def _apply_reset(self, reset):
@@ -214,6 +288,20 @@ class Brain:
             self.pose = Pose()
             self.log("Pose reset to the center")
         self.reset_seen = reset
+
+    def _apply_restore(self, restore):
+        """Take the server's last pose once after a reboot, before any move."""
+        if not isinstance(restore, dict) or self.restored:
+            return
+        x, y, heading = restore.get("x"), restore.get("y"), restore.get("heading")
+        if self.moved or not all(isinstance(value, (int, float)) for value in (x, y, heading)):
+            # Reported as handled, so the server stops offering it.
+            self.restored = True
+            self.log("Pose restore skipped")
+            return
+        self.pose = Pose(x, y, math.radians(heading))
+        self.restored = True
+        self.log("Pose restored after a reboot")
 
     def _watch_link(self):
         if ticks_diff(ticks_ms(), self.heard_at) <= self.config.LINK_LOST_MS:

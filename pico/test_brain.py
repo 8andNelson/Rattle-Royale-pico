@@ -142,6 +142,56 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(lights.states[-1], "searching")
 
 
+class JogAndDanceTests(unittest.TestCase):
+    def test_a_jog_moves_once_then_reports_done(self) -> None:
+        robot, wheels, _ = brain({"mode": "jog", "id": "j1", "kind": "drive", "amount": 50, "reset": None})
+        robot.tick()
+        robot.tick()
+        robot.tick()
+        self.assertEqual(len(wheels.moves), 1)
+        self.assertEqual(wheels.moves[0][0], wheels.moves[0][1])
+        self.assertEqual(robot.report()["jog_done"], "j1")
+
+    def test_a_spin_jog_turns_in_place(self) -> None:
+        robot, wheels, _ = brain({"mode": "jog", "id": "j2", "kind": "spin", "amount": 90, "reset": None})
+        robot.tick()
+        left, right = wheels.moves[0]
+        self.assertEqual(left, -right)
+        self.assertGreater(right, 0)
+
+    def test_the_victory_wiggle_spins_back_to_where_it_started(self) -> None:
+        robot, wheels, _ = brain({"mode": "celebrate", "id": "c1", "reset": None})
+        for _ in range(10):
+            robot.tick()
+        self.assertEqual(len(wheels.moves), 5)
+        self.assertEqual(sum(right for _, right in wheels.moves), 0)
+
+
+class RecoveryTests(unittest.TestCase):
+    def test_a_restore_is_taken_before_any_move(self) -> None:
+        robot, _, _ = brain({"mode": "hold", "reset": None, "restore": {"x": 80, "y": 20, "heading": 90}})
+        robot.tick()
+        self.assertEqual((robot.pose.x, robot.pose.y), (80, 20))
+        self.assertAlmostEqual(robot.pose.heading, 1.5708, places=3)
+        self.assertTrue(robot.report()["restored"])
+
+    def test_a_restore_after_moving_is_skipped_but_reported_handled(self) -> None:
+        robot, _, _ = brain({"mode": "hold", "reset": None, "restore": {"x": 80, "y": 20, "heading": 90}})
+        robot.moved = True
+        robot.tick()
+        self.assertEqual((robot.pose.x, robot.pose.y), (0, 0))
+        self.assertTrue(robot.report()["restored"])
+
+    def test_reports_carry_a_steady_boot_id_and_health(self) -> None:
+        robot, _, _ = brain({"mode": "hold", "reset": None})
+        robot.tick()
+        first, second = robot.report(), robot.report()
+        self.assertEqual(first["boot"], second["boot"])
+        self.assertEqual(len(first["boot"]), 8)
+        self.assertEqual(set(first["health"]), {"uptime_s", "latency_ms", "rssi", "mem_free"})
+        self.assertIsNotNone(first["health"]["latency_ms"])
+
+
 class RampTests(unittest.TestCase):
     def test_a_long_move_starts_slow_cruises_then_slows(self) -> None:
         times = [ramped_us(tick, 1000, 2000, 3000, 200) for tick in range(1000)]

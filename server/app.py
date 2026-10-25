@@ -10,7 +10,9 @@ player is marked away and keeps the seat for RECONNECT_GRACE_SECONDS. A phone
 that sends that token back in time resumes the seat. A second tab with the
 same token takes the seat over and the first tab is told it was replaced.
 
-A big screen at /screen watches one lobby without playing in it.
+A big screen at /screen watches one lobby without playing in it. The robot
+panel at /robot shows the robot's health and drives it by hand; its calls
+need the robot token.
 """
 
 import asyncio
@@ -22,7 +24,7 @@ from aiohttp import ClientConnectionError, WSMsgType, web
 
 from server.arduino_bridge import Bridge
 from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
-from server.pages import ARENA_JS, PAGE, SCREEN
+from server.pages import ARENA_JS, PAGE, ROBOT_PANEL, SCREEN
 from server.pico_link import PicoLink
 
 HOST = "0.0.0.0"
@@ -51,10 +53,12 @@ def create_app(
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket)
     app.router.add_get("/screen", screen)
+    app.router.add_get("/robot", robot_panel)
     app.router.add_get("/arena.js", arena_js)
     app.router.add_post("/api/robot", robot_poll)
     app.router.add_get("/api/robot/status", robot_status)
     app.router.add_post("/api/robot/test", robot_test)
+    app.router.add_post("/api/robot/control", robot_control)
     return app
 
 
@@ -68,6 +72,10 @@ async def index(_request: web.Request) -> web.Response:
 
 async def screen(_request: web.Request) -> web.Response:
     return web.Response(text=SCREEN, content_type="text/html", charset="utf-8")
+
+
+async def robot_panel(_request: web.Request) -> web.Response:
+    return web.Response(text=ROBOT_PANEL, content_type="text/html", charset="utf-8")
 
 
 async def arena_js(_request: web.Request) -> web.Response:
@@ -158,6 +166,8 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
                 raise LobbyError("The robot is busy with another lobby's chase.")
             if chase and robot.halted:
                 raise LobbyError("The robot is stopped. Resume it first.")
+            if chase and robot.manual:
+                raise LobbyError("The robot is in manual control. Hand it back from the robot panel.")
             if chase and not robot.at_home():
                 raise LobbyError("The robot is not on the center mark yet.")
             code = book.start(player_id, chase=chase)
@@ -195,11 +205,7 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             current = book.robot_round()
             if current is not None and current["code"] != book.code_of(player_id):
                 raise LobbyError("Only the creator of the running chase can stop it.")
-            app["robot"].halt()
-            log.info("robot stopped by a host")
-            if current is not None and book.stop_chase(current["code"]):
-                log.info("lobby %s finished because the robot was stopped", current["code"])
-            await broadcast_all(app)
+            await stop_robot(app)
         elif kind == "resume_robot":
             if player_id is None or not book.is_creator(player_id):
                 raise LobbyError("Only a lobby creator can resume the robot.")
@@ -300,6 +306,57 @@ async def robot_test(request: web.Request) -> web.Response:
     except ValueError as error:
         raise web.HTTPBadRequest(text=str(error))
     return web.json_response(robot.status(request.app["book"]))
+
+
+async def robot_control(request: web.Request) -> web.Response:
+    """The /robot panel's buttons. Moves are refused while a chase runs."""
+    robot = robot_link(request)
+    app = request.app
+    book: LobbyBook = app["book"]
+    payload = await read_json(request)
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(text="Send an action.")
+    action = payload.get("action")
+    chase_open = book.robot_round() is not None
+    try:
+        if action == "stop":
+            await stop_robot(app)
+        elif action == "resume":
+            robot.resume()
+        elif action == "reset":
+            if chase_open:
+                raise ValueError("A chase is running.")
+            robot.request_reset()
+        elif chase_open and action in ("manual", "jog", "goto", "goto_seat", "home"):
+            raise ValueError("A chase is running. Stop it first.")
+        elif action == "manual":
+            robot.set_manual(payload.get("on") is True)
+        elif action == "jog":
+            robot.add_jog(payload.get("kind"), payload.get("amount"))
+        elif action == "goto":
+            robot.set_test_point(payload)
+        elif action == "goto_seat":
+            robot.goto_seat(payload.get("seat"), payload.get("count"))
+        elif action == "home":
+            robot.go_home()
+        else:
+            raise ValueError("That action was not recognized.")
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=str(error))
+    log.info("robot panel: %s", action)
+    await broadcast_all(app)
+    return web.json_response(robot.status(book))
+
+
+async def stop_robot(app: web.Application) -> None:
+    """Halt the robot and end any running chase with no winner."""
+    book: LobbyBook = app["book"]
+    current = book.robot_round()
+    app["robot"].halt()
+    log.info("robot stopped by a host")
+    if current is not None and book.stop_chase(current["code"]):
+        log.info("lobby %s finished because the robot was stopped", current["code"])
+    await broadcast_all(app)
 
 
 async def finish_when_due(app: web.Application, code: str) -> None:

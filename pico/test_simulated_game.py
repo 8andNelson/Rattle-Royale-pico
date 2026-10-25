@@ -115,6 +115,38 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         await ada_socket.close()
         await bea_socket.close()
 
+    async def test_a_panel_jog_drives_and_a_reboot_gets_the_pose_back(self) -> None:
+        headers = {"Authorization": "Bearer " + TOKEN}
+        await asyncio.sleep(0.5)
+        response = await self.session.post(
+            self.url + "/api/robot/control", json={"action": "jog", "kind": "drive", "amount": 100}, headers=headers
+        )
+        self.assertEqual(response.status, 200)
+        brain = self.robot.brain
+        for _ in range(100):
+            if brain.jog_done is not None:
+                break
+            await asyncio.sleep(0.05)
+        self.assertAlmostEqual(brain.pose.x, 100, delta=1)
+        await asyncio.sleep(0.5)
+
+        rebooted = Brain(brain.config, self.robot.wheels, HttpLink(self.url, TOKEN), SimWlan(), log=lambda *_: None)
+        self.assertNotEqual(rebooted.boot, brain.boot)
+        self.robot.brain = rebooted
+        for _ in range(60):
+            if rebooted.restored:
+                break
+            await asyncio.sleep(0.05)
+        self.assertTrue(rebooted.restored)
+        self.assertAlmostEqual(rebooted.pose.x, 100, delta=1)
+        for _ in range(40):
+            status = await (await self.session.get(self.url + "/api/robot/status", headers=headers)).json()
+            if not status["restoring"]:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(status["boots"], 2)
+        self.assertFalse(status["restoring"])
+
     async def test_a_reset_puts_the_robot_back_on_the_center(self) -> None:
         robot = self.robot.brain
         await asyncio.sleep(0.5)

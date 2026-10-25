@@ -33,12 +33,12 @@ The split is different from the Arduino plan. The Pico W owns the pose, the plan
 ```text
 Pico W                                     Laptop
 POST /api/robot  --HTTPS via ngrok-->      game server
-  pose, moving, arrival                      reply: chase / hold / home / test / stop
+  pose, arrival, health                      reply: chase / hold / home / test / stop / jog / celebrate
 ```
 
 - The Pico polls `POST /api/robot` about every 300 ms on one kept-alive HTTPS connection, through the same ngrok address the phones use. Any Wi-Fi with internet works, including a phone hotspot. eduroam's enterprise login does not.
 - Every request needs `Authorization: Bearer <token>`. The token is `RATTLE_ROBOT_TOKEN` on the laptop and `ROBOT_TOKEN` in `pico/config.py`. With no token set, the robot endpoints answer 503.
-- The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), `test` with a point set through `POST /api/robot/test`, or `stop` while a host has the robot stopped. `GET /api/robot/status` shows the last pose and the current order.
+- The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), `test` with a point set through `POST /api/robot/test` or the robot panel, `stop` while a host has the robot stopped, `jog` for one relative drive or spin from the panel, or `celebrate` for the victory wiggle. `GET /api/robot/status` shows the last pose and the current order.
 - Marks sit on a circle of `MARK_RADIUS_MM` (152.4 mm, 6 in, in `server/pico_link.py`), the same circle the Arduino planner uses. Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
 - The Pico starts its pose at the center, pointed at seat 0, so it must be placed there before power-on. In `home` it drives back to the center and faces seat 0 on its own.
 - Every order carries a `reset` id. The lobby creator's **The robot is on the center mark** button changes it, and the robot then sets its pose back to the center facing seat 0. Use it after placing the robot by hand.
@@ -58,6 +58,17 @@ POST /api/robot  --HTTPS via ngrok-->      game server
 - The phone vibrates when the robot starts coming for that player, and again when that player wins.
 - `/screen` is a read-only big screen for a laptop or projector: `http://<host>/screen?code=ABCD`, or enter the code on the page. It shows the arena large, the join address and code, the countdown and clock, the chase line, every player's shakes with a pull bar, and the result. It follows the lobby into a rematch. The phone page and the big screen draw the arena from the same `/arena.js`.
 
+### Robot panel, health, and recovery
+
+`/robot` is a control panel for the host. Its calls need the robot token, which it asks for once and keeps in that browser.
+
+- It shows the link, the current order, the pose, whether the robot is in game, manual, or stopped control, and the Pico's health from every report: Wi-Fi signal (dBm), poll time, free memory, uptime, and how many boots the server has seen. A map draws the robot among 1 to 8 marks.
+- **Take control** puts the robot in manual control. It then holds still instead of driving home, and a chase cannot start until **Hand back and drive home**.
+- Jogs drive forward or back by millimeters, or spin left or right by degrees, once each. A jog puts the robot in manual control. Drives go up to 1000 mm and spins up to 720°. **Go to a mark** drives to any seat's mark on the 152.4 mm circle. Together they replace `calibrate.py`: drive 200 mm and measure, spin a full turn and measure.
+- The panel also has **Stop the robot**, **Resume**, and **It is on the center mark**. Moves are refused while a chase runs. Stop is not.
+- Every report carries a boot id. A new boot id within 60 seconds of the last report means the Pico rebooted, often from a brownout when both motors pull current. The next orders carry the pose the server last saw, and the robot takes it if it has not moved since starting. **It is on the center mark** cancels a pending restore.
+- After the robot reaches the winner it wiggles in place for 3 seconds (`celebrate`), then drives home. The wiggle spins 20°, back 40°, forward 40°, back 40°, and forward 20°, in whole multiples of one step count, so it ends exactly where it began.
+
 ### Host stop
 
 The lobby creator sees a red **Stop the robot** button whenever the robot is online. During a chase only that lobby's creator can press it.
@@ -66,7 +77,7 @@ The lobby creator sees a red **Stop the robot** button whenever the robot is onl
 - Every order is then `stop`. The robot cuts the move in flight and stays still, and its pose stays right, since it counts only the steps it took.
 - A chase cannot start while the robot is stopped. **Resume the robot**, or **The robot is on the center mark** after placing it by hand, lets it move again.
 
-`pico/brain.py` holds every decision: orders, arrival, home, reset, stop, Wi-Fi handover, the LED state, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulator.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
+`pico/brain.py` holds every decision: orders, arrival, home, reset, stop, jogs, the wiggle, reboot recovery, Wi-Fi handover, the LED state, health, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulator.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
 
 ```text
 python pico/simulator.py --token <RATTLE_ROBOT_TOKEN> --speed 5
