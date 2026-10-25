@@ -41,13 +41,31 @@ POST /api/robot  --HTTPS via ngrok-->      game server
 - The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), or `test` with a point set through `POST /api/robot/test`. `GET /api/robot/status` shows the last pose and the current order.
 - Marks sit on a circle of `MARK_RADIUS_MM` (250 mm, in `server/robot.py`). Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
 - The Pico starts its pose at the center, pointed at seat 0, so it must be placed there before power-on. In `home` it drives back to the center and faces seat 0 on its own.
+- Every order carries a `reset` id. The lobby creator's **The robot is on the center mark** button changes it, and the robot then sets its pose back to the center facing seat 0. Use it after placing the robot by hand.
 - Core 1 does nothing but step the motors, so a slow HTTPS request on core 0 never stalls them. A move can be cut short at any step. The pose counts only the steps the wheels took, so a new order stops the move in flight and replans at once.
-- A chase reports arrival inside `ARRIVAL_RADIUS_MM` (75 mm). The server logs it. The winner is still the highest shake count.
 - Without a good reply for 2 seconds, the robot holds still.
+
+`pico/brain.py` holds every decision: orders, arrival, home, reset, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulate.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
+
+```text
+python pico/simulate.py --token <RATTLE_ROBOT_TOKEN> --speed 5
+```
+
+### Chase round
+
+A round started while the robot is online is a chase. Otherwise it is the 20-second shake contest, unchanged.
+
+- Start is refused until the robot is online, still, within 30 mm of the center, and facing seat 0 within 10°. Only one chase runs at a time.
+- The chase lasts `CHASE_ROUND_SECONDS` (60). Shakes and pull work the same as in the contest.
+- The robot reaching a mark, inside 75 mm, ends the round at once, and that seat wins, even if it lost the lead on the same tick.
+- At the clock, the player being chased wins. Nobody chased is a draw.
+- The result is frozen when the round ends, so it stays if the winner leaves.
+- Phones show whether the robot is online and on the center, whether the round is a chase or a contest, and an arena: marks on the circle, the chased mark in red, the viewer's mark outlined, and the robot as a yellow triangle at its pose.
+- After the round the robot drives home by itself.
 
 Pico W wiring: left ULN2003 IN1–IN4 on GP2–GP5, right ULN2003 IN1–IN4 on GP6–GP9, and Pico GND tied to both driver grounds and the motor supply ground. Driver VCC comes from the motor supply, never from the Pico's 3.3 V pin.
 
-At 3 ms per half-step and 38 mm wheels, the robot moves about 10 mm per second. Crossing a 250 mm circle takes about 25 seconds, longer than the 20-second round. A faster `STEP_US` or a longer round is needed before arrival can decide anything.
+At 3 ms per half-step and 38 mm wheels, the robot moves about 10 mm per second. Reaching a mark 250 mm out takes about 20 seconds of a 60-second chase, so a lead change has little time to matter. A faster `STEP_US`, a smaller circle, or a longer chase makes the race closer.
 
 ## What already exists
 
