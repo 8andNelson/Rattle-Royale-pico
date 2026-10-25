@@ -13,8 +13,10 @@ from aiohttp import ClientSession, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config_example  # noqa: E402
 from brain import Brain  # noqa: E402
 from server.app import create_app  # noqa: E402
+from server.pico_link import MARK_RADIUS_MM  # noqa: E402
 from simulator import HttpLink, SimWheels, SimWlan, settings  # noqa: E402
 
 TOKEN = "game-test"
@@ -76,14 +78,12 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(started["chase"])
 
         await socket.send_json({"type": "shakes", "total": 10})
-        moving = await self.lobby_until(socket, lambda m: m["robot"]["pose"] and m["robot"]["pose"]["moving"], 5)
-        self.assertTrue(moving["players"][0]["chased"])
-
         done = await self.lobby_until(socket, lambda m: m["finished"], 20)
+        self.assertTrue(done["players"][0]["chased"])
         self.assertEqual(done["reason"], "arrival")
         self.assertEqual(done["winners"], ["Ada"])
         pose = done["robot"]["pose"]
-        self.assertGreater(pose["x"], 250 - 75 - 5)
+        self.assertGreater(pose["x"], MARK_RADIUS_MM - config_example.ARRIVAL_RADIUS_MM - 5)
 
         await self.lobby_until(socket, lambda m: m["robot"]["home"], 20)
         await socket.close()
@@ -111,7 +111,7 @@ class GameTests(unittest.IsolatedAsyncioTestCase):
         done = await self.lobby_until(ada_socket, lambda m: m["finished"], 30)
         self.assertEqual(done["winners"], ["Bea"])
         self.assertEqual(done["reason"], "arrival")
-        self.assertLess(done["robot"]["pose"]["x"], -250 + 75 + 5)
+        self.assertLess(done["robot"]["pose"]["x"], -MARK_RADIUS_MM + config_example.ARRIVAL_RADIUS_MM + 5)
         await ada_socket.close()
         await bea_socket.close()
 

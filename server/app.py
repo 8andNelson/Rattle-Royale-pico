@@ -73,6 +73,7 @@ PAGE = """<!DOCTYPE html>
     #round-kind, #robot-status { margin: 0 0 0.75rem; color: #aaa; }
     #arena { display: block; width: 100%; max-width: 18rem; margin: 0 auto 1rem; }
     #arena[hidden] { display: none; }
+    #stop-robot { background: #b22; color: #fff; border: none; }
     #players { list-style: none; padding: 0; margin: 0 0 1.25rem; font-size: 1.35rem; }
     #players li { padding: 0.35rem 0; }
     #shakes { font-size: 1.6rem; margin: 0 0 0.4rem; text-align: center; }
@@ -107,6 +108,8 @@ PAGE = """<!DOCTYPE html>
       <p id="result" hidden></p>
       <button id="start" type="button" hidden>Start game</button>
       <button id="robot-home" type="button" hidden>The robot is on the center mark</button>
+      <button id="stop-robot" type="button" hidden>Stop the robot</button>
+      <button id="resume-robot" type="button" hidden>Resume the robot</button>
       <button id="rematch" type="button" hidden>Rematch</button>
       <p id="waiting" hidden>Waiting for the creator to start</p>
       <button id="leave" type="button">Leave lobby</button>
@@ -155,6 +158,9 @@ PAGE = """<!DOCTYPE html>
       if (reason === "draw") {
         return "Nobody shook. Draw";
       }
+      if (reason === "stopped") {
+        return "The robot was stopped. No winner";
+      }
       if (!winners || winners.length === 0) {
         return "No winner";
       }
@@ -190,6 +196,9 @@ PAGE = """<!DOCTYPE html>
       const robot = message.robot;
       if (!robot || !robot.online) {
         return message.started ? "Robot offline" : "Robot offline. This will be a 20-second shake contest.";
+      }
+      if (robot.halted) {
+        return "Robot stopped by a host";
       }
       if (message.started) {
         return "Robot online";
@@ -258,6 +267,11 @@ PAGE = """<!DOCTYPE html>
         message.players.length + " of " + message.max;
       document.getElementById("start").hidden = !(message.creator && !message.started);
       const robotOnline = Boolean(message.robot && message.robot.online);
+      const robotHalted = Boolean(message.robot && message.robot.halted);
+      const chaseRunning = message.chase && message.started && !message.finished;
+      document.getElementById("stop-robot").hidden =
+        !(message.creator && robotOnline && !robotHalted && (chaseRunning || !message.started || message.finished));
+      document.getElementById("resume-robot").hidden = !(message.creator && robotHalted && !chaseRunning);
       document.getElementById("robot-home").hidden = !(message.creator && !message.started && robotOnline);
       document.getElementById("robot-status").textContent = robotStatusText(message);
       const roundKind = document.getElementById("round-kind");
@@ -359,6 +373,12 @@ PAGE = """<!DOCTYPE html>
     });
     document.getElementById("robot-home").addEventListener("click", () => {
       send({ type: "robot_home" });
+    });
+    document.getElementById("stop-robot").addEventListener("click", () => {
+      send({ type: "stop_robot" });
+    });
+    document.getElementById("resume-robot").addEventListener("click", () => {
+      send({ type: "resume_robot" });
     });
     document.getElementById("leave").addEventListener("click", () => {
       send({ type: "leave" });
@@ -703,6 +723,8 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             chase = robot.online()
             if chase and book.robot_round() is not None:
                 raise LobbyError("The robot is busy with another lobby's chase.")
+            if chase and robot.halted:
+                raise LobbyError("The robot is stopped. Resume it first.")
             if chase and not robot.at_home():
                 raise LobbyError("The robot is not on the center mark yet.")
             code = book.start(player_id, chase=chase)
@@ -730,6 +752,23 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
                 raise LobbyError("The robot is in a chase right now.")
             app["robot"].request_reset()
             log.info("robot pose reset to the center")
+            await broadcast_all(app)
+        elif kind == "stop_robot":
+            if player_id is None or not book.is_creator(player_id):
+                raise LobbyError("Only a lobby creator can stop the robot.")
+            current = book.robot_round()
+            if current is not None and current["code"] != book.code_of(player_id):
+                raise LobbyError("Only the creator of the running chase can stop it.")
+            app["robot"].halt()
+            log.info("robot stopped by a host")
+            if current is not None and book.stop_chase(current["code"]):
+                log.info("lobby %s finished because the robot was stopped", current["code"])
+            await broadcast_all(app)
+        elif kind == "resume_robot":
+            if player_id is None or not book.is_creator(player_id):
+                raise LobbyError("Only a lobby creator can resume the robot.")
+            app["robot"].resume()
+            log.info("robot resumed")
             await broadcast_all(app)
         elif kind == "leave":
             if player_id is not None:

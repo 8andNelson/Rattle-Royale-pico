@@ -33,23 +33,43 @@ The split is different from the Arduino plan. The Pico W owns the pose, the plan
 ```text
 Pico W                                     Laptop
 POST /api/robot  --HTTPS via ngrok-->      game server
-  pose, moving, arrival                      reply: chase / hold / home / test
+  pose, moving, arrival                      reply: chase / hold / home / test / stop
 ```
 
 - The Pico polls `POST /api/robot` about every 300 ms on one kept-alive HTTPS connection, through the same ngrok address the phones use. Any Wi-Fi with internet works, including a phone hotspot. eduroam's enterprise login does not.
 - Every request needs `Authorization: Bearer <token>`. The token is `RATTLE_ROBOT_TOKEN` on the laptop and `ROBOT_TOKEN` in `pico/config.py`. With no token set, the robot endpoints answer 503.
-- The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), or `test` with a point set through `POST /api/robot/test`. `GET /api/robot/status` shows the last pose and the current order.
-- Marks sit on a circle of `MARK_RADIUS_MM` (250 mm, in `server/pico_link.py`). Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
+- The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), `test` with a point set through `POST /api/robot/test`, or `stop` while a host has the robot stopped. `GET /api/robot/status` shows the last pose and the current order.
+- Marks sit on a circle of `MARK_RADIUS_MM` (152.4 mm, 6 in, in `server/pico_link.py`), the same circle the Arduino planner uses. Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
 - The Pico starts its pose at the center, pointed at seat 0, so it must be placed there before power-on. In `home` it drives back to the center and faces seat 0 on its own.
 - Every order carries a `reset` id. The lobby creator's **The robot is on the center mark** button changes it, and the robot then sets its pose back to the center facing seat 0. Use it after placing the robot by hand.
 - Core 1 does nothing but step the motors, so a slow HTTPS request on core 0 never stalls them. A move can be cut short at any step. The pose counts only the steps the wheels took, so a new order stops the move in flight and replans at once.
 - Without a good reply for 2 seconds, the robot holds still.
+- `WIFI_NETWORKS` in `pico/config.py` lists networks in order, such as the venue Wi-Fi and then a phone hotspot. A network that drops or does not connect within 10 seconds hands over to the next one.
+- The onboard LED shows the link: a fast blink while joining Wi-Fi, a slow blink while looking for the server, solid when online, and a double blink while a host has the robot stopped.
+- Each move ramps from `START_STEP_US` (3000) to `STEP_US` (2000) over `RAMP_STEPS` (200), and slows the same way before it ends, so the motors cruise faster than they could start.
 
-`pico/brain.py` holds every decision: orders, arrival, home, reset, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulator.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
+### Host stop
+
+The lobby creator sees a red **Stop the robot** button whenever the robot is online. During a chase only that lobby's creator can press it.
+
+- Stop ends a running chase at once. The result is "The robot was stopped. No winner".
+- Every order is then `stop`. The robot cuts the move in flight and stays still, and its pose stays right, since it counts only the steps it took.
+- A chase cannot start while the robot is stopped. **Resume the robot**, or **The robot is on the center mark** after placing it by hand, lets it move again.
+
+`pico/brain.py` holds every decision: orders, arrival, home, reset, stop, Wi-Fi handover, the LED state, and a lost link. `pico/main.py` runs it with the real wheels and Wi-Fi. `pico/simulator.py` runs the same brain on the laptop with pretend wheels, so phones can play a whole chase before the robot exists:
 
 ```text
 python pico/simulator.py --token <RATTLE_ROBOT_TOKEN> --speed 5
 ```
+
+`pico/deploy.py` copies the robot onto a Pico W over USB with mpremote, then restarts it. `--bench` leaves `main.py` off, so the robot does not drive on boot while `motor_test.py`, `link_test.py`, and `calibrate.py` are run from Thonny:
+
+```text
+python pico/deploy.py --bench
+python pico/deploy.py
+```
+
+`pico/config_example.py` starts from the measured Arduino car: 38 mm wheels and a 127 mm wheel base (34.31 steps per millimeter, 38.03 per degree of spin), and forward is coil direction -1 on both wheels.
 
 ### Chase round
 
@@ -57,15 +77,15 @@ A round started while the robot is online is a chase. Otherwise it is the 20-sec
 
 - Start is refused until the robot is online, still, within 30 mm of the center, and facing seat 0 within 10°. Only one chase runs at a time.
 - The chase lasts `CHASE_ROUND_SECONDS` (60). Shakes and pull work the same as in the contest.
-- The robot reaching a mark, inside 75 mm, ends the round at once, and that seat wins, even if it lost the lead on the same tick.
-- At the clock, the player being chased wins. Nobody chased is a draw.
+- The robot reaching a mark, inside 25 mm, ends the round at once, and that seat wins, even if it lost the lead on the same tick.
+- At the clock, the player being chased wins. Nobody chased is a draw. A host stop has no winner.
 - The result is frozen when the round ends, so it stays if the winner leaves.
 - Phones show whether the robot is online and on the center, whether the round is a chase or a contest, and an arena: marks on the circle, the chased mark in red, the viewer's mark outlined, and the robot as a yellow triangle at its pose.
 - After the round the robot drives home by itself.
 
 Pico W wiring: left ULN2003 IN1–IN4 on GP2–GP5, right ULN2003 IN1–IN4 on GP6–GP9, and Pico GND tied to both driver grounds and the motor supply ground. Driver VCC comes from the motor supply, never from the Pico's 3.3 V pin.
 
-At 3 ms per half-step and 38 mm wheels, the robot moves about 10 mm per second. Reaching a mark 250 mm out takes about 20 seconds of a 60-second chase, so a lead change has little time to matter. A faster `STEP_US`, a smaller circle, or a longer chase makes the race closer.
+At a 2 ms cruise and 38 mm wheels, the robot moves about 15 mm per second. Reaching a mark 152.4 mm out takes about 9 seconds of a 60-second chase. If the motors skip at 2 ms, raise `STEP_US` toward 3000, which is about 10 mm per second and about 13 seconds to a mark.
 
 ## What already exists
 

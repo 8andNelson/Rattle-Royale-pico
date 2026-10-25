@@ -7,6 +7,9 @@ The robot plans its own spins and drives. The laptop never sends steps.
 Every order also carries a reset id. When it changes, the robot sets its pose
 back to the center, pointed at seat 0. The host asks for that after placing
 the robot there by hand.
+
+A host can stop the robot at any time. Every order is then stop, until the
+host resumes it or marks it back on the center.
 """
 
 import math
@@ -15,7 +18,7 @@ import time
 
 from server.lobby import LobbyBook
 
-MARK_RADIUS_MM = 250.0
+MARK_RADIUS_MM = 152.4
 ONLINE_SECONDS = 3.0
 HOME_RADIUS_MM = 30.0
 HOME_HEADING_DEGREES = 10.0
@@ -30,6 +33,7 @@ class PicoLink:
         self.arrivals: list[dict] = []
         self.test_point: dict | None = None
         self.reset_id: str | None = None
+        self.halted = False
 
     @property
     def enabled(self) -> bool:
@@ -56,6 +60,13 @@ class PicoLink:
     def request_reset(self) -> None:
         self.reset_id = secrets.token_hex(4)
         self.pose = None
+        self.halted = False
+
+    def halt(self) -> None:
+        self.halted = True
+
+    def resume(self) -> None:
+        self.halted = False
 
     def summary(self) -> dict:
         """What phones see."""
@@ -64,6 +75,7 @@ class PicoLink:
             "home": self.at_home(),
             "pose": self.pose,
             "radius": self.mark_radius,
+            "halted": self.halted,
         }
 
     def poll(self, book: LobbyBook, report: object, now: float | None = None) -> tuple[dict, dict | None]:
@@ -89,6 +101,8 @@ class PicoLink:
         return order
 
     def _order(self, book: LobbyBook) -> dict:
+        if self.halted:
+            return {"mode": "stop"}
         current = book.robot_round()
         if current is not None:
             target = current["target"]
@@ -123,6 +137,7 @@ class PicoLink:
             "online": self.online(),
             "seen_seconds_ago": None if self.seen_at is None else round(time.time() - self.seen_at, 1),
             "pose": self.pose,
+            "halted": self.halted,
             "order": self.order(book),
             "arrivals": self.arrivals[-5:],
         }

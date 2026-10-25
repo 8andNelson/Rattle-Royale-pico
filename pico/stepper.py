@@ -8,6 +8,10 @@ A move is a signed step count per wheel in forward terms. Both wheels finish
 together, so a spin or a drive stays straight. stop() ends a move between
 steps, and take_steps() reports what each wheel really did, so the pose stays
 right even when a move is cut short.
+
+Each move ramps: it starts at the slow step time, speeds up to the cruise
+step time over the ramp, and slows the same way before the last step. A
+stepper can hold a speed it cannot start at.
 """
 
 import _thread
@@ -28,8 +32,28 @@ SEQUENCE = (
 )
 
 
+def ramped_us(tick, length, cruise_us, start_us, ramp_steps):
+    """Step time for one tick of a move. Slow at both ends, cruise between."""
+    edge = min(tick, length - tick)
+    if ramp_steps <= 0 or edge >= ramp_steps or start_us <= cruise_us:
+        return cruise_us
+    return start_us - (start_us - cruise_us) * edge // ramp_steps
+
+
+def wheels_from(config):
+    return Wheels(
+        config.LEFT_PINS,
+        config.RIGHT_PINS,
+        config.LEFT_FORWARD,
+        config.RIGHT_FORWARD,
+        config.STEP_US,
+        getattr(config, "START_STEP_US", config.STEP_US),
+        getattr(config, "RAMP_STEPS", 0),
+    )
+
+
 class Wheels:
-    def __init__(self, left_pins, right_pins, left_forward, right_forward, step_us):
+    def __init__(self, left_pins, right_pins, left_forward, right_forward, step_us, start_us=None, ramp_steps=0):
         self._pins = (
             [Pin(n, Pin.OUT, value=0) for n in left_pins],
             [Pin(n, Pin.OUT, value=0) for n in right_pins],
@@ -37,6 +61,8 @@ class Wheels:
         self._forward = (left_forward, right_forward)
         self._phase = [0, 0]
         self._step_us = step_us
+        self._start_us = step_us if start_us is None else start_us
+        self._ramp_steps = ramp_steps
         self._lock = _thread.allocate_lock()
         self._goal = [0, 0]
         self._sent = [0, 0]
@@ -84,6 +110,7 @@ class Wheels:
             stepped = False
             with self._lock:
                 if self._ticks < self._length:
+                    interval = ramped_us(self._ticks, self._length, self._step_us, self._start_us, self._ramp_steps)
                     self._ticks += 1
                     for wheel in (0, 1):
                         goal = self._goal[wheel]
@@ -97,7 +124,7 @@ class Wheels:
                     stepped = True
             if stepped:
                 released = False
-                due = time.ticks_add(due, self._step_us)
+                due = time.ticks_add(due, interval)
                 wait = time.ticks_diff(due, time.ticks_us())
                 if wait > 0:
                     time.sleep_us(wait)

@@ -12,12 +12,12 @@ import time
 
 import config
 from navigation import Geometry
-from stepper import Wheels
+from stepper import wheels_from
 
 DRIVE_MM = 200
 
 geometry = Geometry(config.WHEEL_DIAMETER_MM, config.STEPS_PER_REV, config.WHEEL_BASE_MM)
-wheels = Wheels(config.LEFT_PINS, config.RIGHT_PINS, config.LEFT_FORWARD, config.RIGHT_FORWARD, config.STEP_US)
+wheels = wheels_from(config)
 
 
 def run(label, steps):

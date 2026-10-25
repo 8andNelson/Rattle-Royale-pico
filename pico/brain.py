@@ -10,12 +10,16 @@ The server says what to do on every poll:
   hold   stop where it is (a chase is open, nobody has pull)
   home   drive back to the center and face seat 0 (no chase is open)
   test   drive to a test point (no chase is open)
+  stop   a host pressed stop; stay still until they resume
 
 Every order also carries a reset id. A new id means the host just placed the
 robot on the center mark, so the pose goes back to the center facing seat 0.
 
 The server never sends steps. A new order cuts the current move short, and
 the pose counts only the steps the wheels really took. A lost link holds.
+
+Wi-Fi networks are tried in order. When one drops or never connects, the
+next one gets a turn.
 """
 
 import math
@@ -43,6 +47,36 @@ except ImportError:
 RECONNECT_MS = 10000
 _UNSEEN = object()
 
+# LED patterns as (on ms, off ms) pairs, repeated.
+BLINKS = {
+    "joining": ((100, 100),),
+    "searching": ((500, 500),),
+    "online": ((1000, 0),),
+    "stopped": ((100, 150), (100, 650)),
+}
+
+
+def blink_lit(state, now_ms):
+    pattern = BLINKS.get(state, BLINKS["searching"])
+    moment = now_ms % sum(on + off for on, off in pattern)
+    for on, off in pattern:
+        if moment < on:
+            return True
+        moment -= on + off
+        if moment < 0:
+            return False
+    return False
+
+
+def wifi_networks(config):
+    """(ssid, password) pairs. An older config with one WIFI_SSID still works."""
+    networks = list(getattr(config, "WIFI_NETWORKS", []))
+    if not networks and getattr(config, "WIFI_SSID", None):
+        networks = [(config.WIFI_SSID, config.WIFI_PASSWORD)]
+    if not networks:
+        raise ValueError("config.py has no WIFI_NETWORKS.")
+    return networks
+
 
 def goal_of(order):
     """What the robot is after. A change cuts the current move short."""
@@ -55,12 +89,15 @@ def goal_of(order):
 
 
 class Brain:
-    def __init__(self, config, wheels, link, wlan, log=print):
+    def __init__(self, config, wheels, link, wlan, log=print, indicator=None):
         self.config = config
         self.wheels = wheels
         self.link = link
         self.wlan = wlan
         self.log = log
+        self.indicator = indicator
+        self.networks = wifi_networks(config)
+        self.network = 0
         self.geometry = Geometry(config.WHEEL_DIAMETER_MM, config.STEPS_PER_REV, config.WHEEL_BASE_MM)
         self.pose = Pose()
         self.order = {"mode": "hold"}
@@ -96,6 +133,18 @@ class Brain:
             self.arrival = reached or self.arrival
             if steps is not None and steps != (0, 0):
                 self.wheels.move(*steps)
+        if self.indicator is not None:
+            self.indicator.show(self.state(), ticks_ms())
+
+    def state(self):
+        """joining, searching, online, or stopped. The LED shows it."""
+        if not self.wlan.isconnected():
+            return "joining"
+        if not self.online:
+            return "searching"
+        if self.order.get("mode") == "stop":
+            return "stopped"
+        return "online"
 
     def next_move(self):
         """Returns (steps or None, arrival or None)."""
@@ -135,8 +184,11 @@ class Brain:
                 self.online = False
                 self.link.close()
             if ticks_diff(now, self.joined_at) > RECONNECT_MS:
+                self.network = (self.network + 1) % len(self.networks)
+                ssid, password = self.networks[self.network]
+                self.log("Trying Wi-Fi", ssid)
                 self.wlan.disconnect()
-                self.wlan.connect(self.config.WIFI_SSID, self.config.WIFI_PASSWORD)
+                self.wlan.connect(ssid, password)
                 self.joined_at = now
             return
         if ticks_diff(now, self.poll_at) < 0:

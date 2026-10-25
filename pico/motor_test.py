@@ -9,11 +9,11 @@ counterclockwise seen from above). A wheel that turns backward on its
 import time
 
 import config
-from stepper import Wheels
+from stepper import wheels_from
 
 STEPS = 512
 
-wheels = Wheels(config.LEFT_PINS, config.RIGHT_PINS, config.LEFT_FORWARD, config.RIGHT_FORWARD, config.STEP_US)
+wheels = wheels_from(config)
 
 
 def run(label, left, right):

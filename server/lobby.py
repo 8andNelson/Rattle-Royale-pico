@@ -8,7 +8,8 @@ the robot would follow.
 
 When the robot is online at the start, the round is a chase instead: it runs
 longer, the robot reaching a mark wins for that seat, and at the clock the
-player being chased wins. Nobody chased at the clock is a draw.
+player being chased wins. Nobody chased at the clock is a draw. A host who
+stops the robot ends the chase with no winner.
 """
 
 import secrets
@@ -58,6 +59,7 @@ class Lobby:
     chase_id: str | None = None
     chase: bool = False
     arrived_id: str | None = None
+    stopped: bool = False
     winners: list[str] | None = None
     reason: str | None = None
 
@@ -218,6 +220,22 @@ class LobbyBook:
         self._finish(lobby, time.time() if now is None else now)
         return True
 
+    def stop_chase(self, code: str, now: float | None = None) -> bool:
+        """A host stopped the robot. Ends an open chase with no winner."""
+        lobby = self._lobbies.get(code)
+        if lobby is None or not lobby.chase or not lobby.started or lobby.finished:
+            return False
+        lobby.stopped = True
+        self._finish(lobby, time.time() if now is None else now)
+        return True
+
+    def code_of(self, player_id: str) -> str | None:
+        return self._membership.get(player_id)
+
+    def is_creator(self, player_id: str) -> bool:
+        code = self._membership.get(player_id)
+        return code is not None and self._lobbies[code].creator_id == player_id
+
     def codes(self) -> list[str]:
         return list(self._lobbies)
 
@@ -346,6 +364,8 @@ def player_snapshot(player: Player, viewer_id: str, started: bool, chase_id: str
 
 def winner_names(lobby: Lobby) -> list[str]:
     if lobby.chase:
+        if lobby.stopped:
+            return []
         winner_id = lobby.arrived_id or lobby.chase_id
         return [player.name for player in lobby.players if player.player_id == winner_id]
     best = max(player.shakes for player in lobby.players)
@@ -353,9 +373,11 @@ def winner_names(lobby: Lobby) -> list[str]:
 
 
 def result_reason(lobby: Lobby) -> str:
-    """shakes for the plain contest. arrival, clock, or draw for a chase."""
+    """shakes for the plain contest. arrival, clock, draw, or stopped for a chase."""
     if not lobby.chase:
         return "shakes"
+    if lobby.stopped:
+        return "stopped"
     if lobby.arrived_id is not None:
         return "arrival"
     if lobby.chase_id is not None:
