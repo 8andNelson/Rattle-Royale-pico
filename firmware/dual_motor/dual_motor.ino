@@ -11,8 +11,9 @@
 //   DRIVE <steps> <direction>
 // <steps> is 1..16000 half-steps. <direction> is 1 or -1.
 //
-// Positive SPIN direction is unverified. Confirm on the bench whether
-// direction 1 turns toward higher seat numbers, then record that here.
+// DRIVE direction 1 rolls away from seat 0. DRIVE direction -1 rolls toward
+// seat 0. SPIN direction 1 turns from seat 0 toward seat 1, which is positive
+// heading. SPIN direction -1 turns toward lower seat numbers.
 //
 // About 4096 half-steps is one revolution of a 28BYJ-48.
 // The laptop chooses each chunk. This sketch does not know seats or pull.
