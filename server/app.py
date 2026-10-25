@@ -2,7 +2,8 @@
 
 A phone can create or join a lobby of up to eight players. Each player gets a
 seat and a floor mark. The creator starts the game. Shakes add to that
-player's score until the timer ends.
+player's score until the timer ends, and fading pull shows who the robot
+would chase.
 """
 
 import asyncio
@@ -10,9 +11,9 @@ import json
 import logging
 import time
 
-from aiohttp import WSMsgType, web
+from aiohttp import ClientConnectionError, WSMsgType, web
 
-from server.lobby import LobbyBook, LobbyError
+from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
 
 HOST = "0.0.0.0"
 PORT = 8080
@@ -65,7 +66,8 @@ PAGE = """<!DOCTYPE html>
     }
     #lobby-count { margin: 0 0 1rem; color: #aaa; }
     #your-seat { font-size: 2rem; margin: 0 0 0.25rem; }
-    #your-mark { margin: 0 0 1rem; color: #aaa; }
+    #your-mark { margin: 0 0 0.35rem; color: #aaa; }
+    #chase { font-size: 1.25rem; margin: 0 0 1rem; }
     #players { list-style: none; padding: 0; margin: 0 0 1.25rem; font-size: 1.35rem; }
     #players li { padding: 0.35rem 0; }
     #shakes { font-size: 1.6rem; margin: 0 0 0.4rem; text-align: center; }
@@ -91,6 +93,7 @@ PAGE = """<!DOCTYPE html>
       <p id="lobby-count"></p>
       <p id="your-seat"></p>
       <p id="your-mark"></p>
+      <p id="chase" hidden></p>
       <ul id="players"></ul>
       <p id="clock" hidden></p>
       <p id="result" hidden></p>
@@ -162,6 +165,7 @@ PAGE = """<!DOCTYPE html>
       if (nowPlaying && !playing) {
         resetShakes();
       }
+      const previousEnd = roundEndsAt;
       playing = nowPlaying;
       roundEndsAt = message.started ? message.ends_at : null;
       shakesEl.hidden = !message.started;
@@ -177,13 +181,30 @@ PAGE = """<!DOCTYPE html>
       const mine = message.players.find((player) => player.you);
       document.getElementById("your-seat").textContent = mine ? "You are seat " + mine.seat : "";
       document.getElementById("your-mark").textContent = mine ? "Stand on mark " + mine.seat : "";
+      const chase = document.getElementById("chase");
+      if (message.started) {
+        const chased = message.players.find((player) => player.chased);
+        chase.hidden = false;
+        if (!chased) {
+          chase.textContent = "The robot is holding still";
+        } else if (chased.you) {
+          chase.textContent = "The robot is coming for you";
+        } else {
+          chase.textContent = "The robot is chasing " + chased.name;
+        }
+      } else {
+        chase.hidden = true;
+        chase.textContent = "";
+      }
       const clock = document.getElementById("clock");
       const result = document.getElementById("result");
       if (playing) {
         clock.hidden = false;
         result.hidden = true;
         result.textContent = "";
-        runCountdown(message.ends_at);
+        if (countdownTimer === null || previousEnd !== message.ends_at) {
+          runCountdown(message.ends_at);
+        }
       } else if (message.finished) {
         if (mine) {
           shakeCount = mine.shakes;
@@ -204,8 +225,14 @@ PAGE = """<!DOCTYPE html>
       message.players.forEach((player) => {
         const item = document.createElement("li");
         const marker = player.you ? " (you)" : "";
-        const score = message.started ? " — " + player.shakes : "";
-        item.textContent = player.name + " — seat " + player.seat + marker + score;
+        let text = player.name + " — seat " + player.seat + marker;
+        if (message.started) {
+          text += " — " + player.shakes + " — pull " + Number(player.pull).toFixed(2);
+          if (player.chased) {
+            text += " — chased";
+          }
+        }
+        item.textContent = text;
         list.append(item);
       });
     }
@@ -562,6 +589,7 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             log.info("lobby %s started", code)
             await broadcast(app, code)
             app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
+            app.setdefault("pull_tasks", {})[code] = asyncio.create_task(fade_pull(app, code))
         elif kind == "shakes":
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
@@ -596,6 +624,19 @@ async def finish_when_due(app: web.Application, code: str) -> None:
     app.setdefault("round_tasks", {}).pop(code, None)
 
 
+async def fade_pull(app: web.Application, code: str) -> None:
+    book: LobbyBook = app["book"]
+    try:
+        while True:
+            await asyncio.sleep(PULL_TICK_SECONDS)
+            if not book.pull_round_open(code):
+                return
+            if book.decay_pull(code):
+                await broadcast(app, code)
+    finally:
+        app.setdefault("pull_tasks", {}).pop(code, None)
+
+
 async def drop_player(app: web.Application, player_id: str) -> None:
     app["sockets"].pop(player_id, None)
     code = app["book"].leave(player_id)
@@ -610,7 +651,10 @@ async def broadcast(app: web.Application, code: str) -> None:
         destination = sockets.get(player_id)
         if destination is None or destination.closed:
             continue
-        await destination.send_str(json.dumps(book.snapshot(code, player_id)))
+        try:
+            await destination.send_str(json.dumps(book.snapshot(code, player_id)))
+        except ClientConnectionError:
+            continue
 
 
 async def send_error(socket: web.WebSocketResponse, message: str) -> None:

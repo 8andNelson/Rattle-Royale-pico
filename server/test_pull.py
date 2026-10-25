@@ -1,0 +1,119 @@
+"""Fading pull and the chase target."""
+
+import time
+import unittest
+
+from server.lobby import (
+    PULL_HALF_LIFE_SECONDS,
+    SCORE_GRACE_SECONDS,
+    LobbyBook,
+)
+
+
+def players(book: LobbyBook, code: str, viewer_id: str) -> dict[str, dict]:
+    snapshot = book.snapshot(code, viewer_id)
+    return {player["name"]: player for player in snapshot["players"]}
+
+
+class PullTests(unittest.TestCase):
+    def test_an_accepted_shake_adds_one_pull_and_claims_the_target(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        book.record_shakes(ada, 5)
+        book.start(ada)
+        book.record_shakes(ada, 5)
+        ada_row = players(book, code, ada)["Ada"]
+        self.assertEqual(ada_row["shakes"], 5)
+        self.assertEqual(ada_row["pull"], 5)
+        self.assertTrue(ada_row["chased"])
+
+    def test_a_jump_over_the_limit_does_not_add_pull(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        book.start(ada)
+        book.record_shakes(ada, 13)
+        ada_row = players(book, code, ada)["Ada"]
+        self.assertEqual(ada_row["shakes"], 0)
+        self.assertEqual(ada_row["pull"], 0)
+        self.assertFalse(ada_row["chased"])
+        book.record_shakes(ada, 12)
+        ada_row = players(book, code, ada)["Ada"]
+        self.assertEqual(ada_row["pull"], 12)
+        self.assertTrue(ada_row["chased"])
+
+    def test_half_life_cuts_pull_in_half_and_a_long_fade_clears_the_target(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        book.start(ada)
+        book.record_shakes(ada, 1)
+        lobby = book._lobbies[code]
+        book.decay_pull(code, now=lobby.pull_at + PULL_HALF_LIFE_SECONDS)
+        self.assertEqual(players(book, code, ada)["Ada"]["pull"], 0.5)
+        self.assertTrue(players(book, code, ada)["Ada"]["chased"])
+        book.decay_pull(code, now=lobby.pull_at + 30)
+        ada_row = players(book, code, ada)["Ada"]
+        self.assertEqual(ada_row["pull"], 0)
+        self.assertFalse(ada_row["chased"])
+
+    def test_a_small_lead_keeps_the_target_and_a_clear_lead_switches_it(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        bea, _ = book.join(code, "Bea")
+        book.start(ada)
+        book.record_shakes(ada, 10)
+        book.record_shakes(bea, 11)
+        rows = players(book, code, ada)
+        self.assertTrue(rows["Ada"]["chased"])
+        self.assertFalse(rows["Bea"]["chased"])
+        book.record_shakes(bea, 12)
+        rows = players(book, code, ada)
+        self.assertFalse(rows["Ada"]["chased"])
+        self.assertTrue(rows["Bea"]["chased"])
+        self.assertEqual([player["name"] for player in book.snapshot(code, ada)["players"]], ["Bea", "Ada"])
+
+    def test_a_tie_keeps_the_current_target(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        bea, _ = book.join(code, "Bea")
+        book.start(ada)
+        book.record_shakes(bea, 8)
+        book.record_shakes(ada, 8)
+        rows = players(book, code, ada)
+        self.assertTrue(rows["Bea"]["chased"])
+        self.assertFalse(rows["Ada"]["chased"])
+
+    def test_the_next_player_is_chased_when_the_target_leaves(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        bea, _ = book.join(code, "Bea")
+        book.start(ada)
+        book.record_shakes(ada, 10)
+        book.record_shakes(bea, 4)
+        book.leave(ada)
+        bea_row = players(book, code, bea)["Bea"]
+        self.assertEqual(bea_row["seat"], 1)
+        self.assertTrue(bea_row["chased"])
+
+    def test_pull_freezes_when_the_round_finishes_and_shakes_still_pick_the_winner(self) -> None:
+        book = LobbyBook()
+        ada, code = book.create("Ada")
+        bea, _ = book.join(code, "Bea")
+        book.start(ada)
+        book.record_shakes(ada, 8)
+        book.record_shakes(bea, 2)
+        lobby = book._lobbies[code]
+        lobby.players[0].pull = 8
+        lobby.players[1].pull = 2
+        lobby.ends_at = time.time() - 10
+        lobby.pull_at = lobby.ends_at + SCORE_GRACE_SECONDS - PULL_HALF_LIFE_SECONDS
+        self.assertTrue(book.finish_if_due(code))
+        snapshot = book.snapshot(code, ada)
+        self.assertEqual(snapshot["winners"], ["Ada"])
+        self.assertEqual(players(book, code, ada)["Ada"]["pull"], 4)
+        self.assertFalse(book.decay_pull(code, now=time.time() + 50))
+        self.assertEqual(players(book, code, ada)["Ada"]["pull"], 4)
+        self.assertFalse(book.pull_round_open(code))
+
+
+if __name__ == "__main__":
+    unittest.main()

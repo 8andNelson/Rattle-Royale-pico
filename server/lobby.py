@@ -2,7 +2,9 @@
 
 Each player gets a seat on a circle. Seats pack until the round starts, then
 lock, and each seat keeps the angle it had at the start. The creator can start
-a 20-second shake game. The highest shake count wins.
+a 20-second shake game. The highest shake count wins. During the round, each
+accepted shake also adds pull that fades, and the chase target is the player
+the robot would follow.
 """
 
 import secrets
@@ -13,6 +15,11 @@ MAX_PLAYERS = 8
 ROUND_SECONDS = 20
 MAX_SHAKE_JUMP = 12
 SCORE_GRACE_SECONDS = 0.5
+PULL_HALF_LIFE_SECONDS = 2.5
+PULL_TICK_SECONDS = 0.25
+PULL_MARGIN_FRACTION = 0.15
+PULL_MARGIN_ABSOLUTE = 1.0
+PULL_FLOOR = 0.05
 CODE_LENGTH = 4
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -31,6 +38,7 @@ class Player:
     accepted_shakes: int = 0
     seat: int = 0
     angle: float | None = None
+    pull: float = 0.0
 
 
 @dataclass
@@ -41,6 +49,8 @@ class Lobby:
     started: bool = False
     finished: bool = False
     ends_at: float | None = None
+    pull_at: float | None = None
+    chase_id: str | None = None
 
 
 class LobbyBook:
@@ -88,6 +98,8 @@ class LobbyBook:
                 player.seat = index
         if lobby.creator_id == player_id:
             lobby.creator_id = lobby.players[0].player_id
+        if lobby.started:
+            self._retarget(lobby)
         return code
 
     def start(self, player_id: str) -> str:
@@ -101,6 +113,8 @@ class LobbyBook:
             player.angle = 360 * player.seat / count
         lobby.started = True
         lobby.ends_at = time.time() + ROUND_SECONDS
+        lobby.pull_at = time.time()
+        lobby.chase_id = None
         return lobby.code
 
     def record_shakes(self, player_id: str, total: object) -> tuple[str, bool]:
@@ -108,20 +122,24 @@ class LobbyBook:
         lobby = self._lobby_for(player_id)
         if not lobby.started or lobby.finished:
             return lobby.code, False
-        if lobby.ends_at is not None and time.time() >= lobby.ends_at + SCORE_GRACE_SECONDS:
-            lobby.finished = True
+        now = time.time()
+        if lobby.ends_at is not None and now >= lobby.ends_at + SCORE_GRACE_SECONDS:
+            self._finish(lobby)
             return lobby.code, True
         if type(total) is not int or total < 0:
             raise LobbyError("That shake total could not be read.")
+        changed = self._decay_to(lobby, now)
         player = next(player for player in lobby.players if player.player_id == player_id)
-        if total <= player.accepted_shakes:
-            return lobby.code, False
-        increase = total - player.accepted_shakes
-        if increase > MAX_SHAKE_JUMP:
-            return lobby.code, False
-        player.accepted_shakes = total
-        player.shakes += increase
-        return lobby.code, True
+        if total > player.accepted_shakes:
+            increase = total - player.accepted_shakes
+            if increase <= MAX_SHAKE_JUMP:
+                player.accepted_shakes = total
+                player.shakes += increase
+                player.pull += increase
+                changed = True
+        if self._retarget(lobby):
+            changed = True
+        return lobby.code, changed
 
     def deadline(self, code: str) -> float | None:
         lobby = self._lobbies.get(code)
@@ -135,8 +153,25 @@ class LobbyBook:
             return False
         if lobby.ends_at is None or time.time() < lobby.ends_at + SCORE_GRACE_SECONDS:
             return False
-        lobby.finished = True
+        self._finish(lobby)
         return True
+
+    def pull_round_open(self, code: str) -> bool:
+        lobby = self._lobbies.get(code)
+        return lobby is not None and lobby.started and not lobby.finished
+
+    def decay_pull(self, code: str, now: float | None = None) -> bool:
+        """Fade pull up to now. Returns whether the scoreboard changed."""
+        lobby = self._lobbies.get(code)
+        if lobby is None or not lobby.started or lobby.finished:
+            return False
+        moment = time.time() if now is None else now
+        if lobby.ends_at is not None:
+            moment = min(moment, lobby.ends_at + SCORE_GRACE_SECONDS)
+        changed = self._decay_to(lobby, moment)
+        if self._retarget(lobby):
+            changed = True
+        return changed
 
     def member_ids(self, code: str) -> list[str]:
         lobby = self._lobbies.get(code)
@@ -156,7 +191,8 @@ class LobbyBook:
             "winners": winner_names(lobby) if lobby.finished else [],
             "creator": viewer_id == lobby.creator_id,
             "players": [
-                player_snapshot(player, viewer_id, lobby.started) for player in lobby.players
+                player_snapshot(player, viewer_id, lobby.started, lobby.chase_id)
+                for player in snapshot_players(lobby)
             ],
         }
 
@@ -166,6 +202,53 @@ class LobbyBook:
             raise LobbyError("You are not in a lobby.")
         return self._lobbies[code]
 
+    def _decay_to(self, lobby: Lobby, now: float) -> bool:
+        if lobby.pull_at is None or now <= lobby.pull_at:
+            return False
+        factor = 0.5 ** ((now - lobby.pull_at) / PULL_HALF_LIFE_SECONDS)
+        changed = False
+        for player in lobby.players:
+            if player.pull <= 0:
+                continue
+            updated = player.pull * factor
+            if updated < PULL_FLOOR:
+                updated = 0.0
+            if updated != player.pull:
+                changed = True
+            player.pull = updated
+        lobby.pull_at = now
+        return changed
+
+    def _retarget(self, lobby: Lobby) -> bool:
+        previous = lobby.chase_id
+        current = next(
+            (
+                player
+                for player in lobby.players
+                if player.player_id == previous and player.pull > 0
+            ),
+            None,
+        )
+        leader = max(lobby.players, key=lambda player: (player.pull, -player.seat))
+        if leader.pull <= 0:
+            lobby.chase_id = None
+        elif current is None or leader.player_id == current.player_id:
+            lobby.chase_id = leader.player_id
+        else:
+            margin = max(PULL_MARGIN_ABSOLUTE, current.pull * PULL_MARGIN_FRACTION)
+            if leader.pull >= current.pull + margin:
+                lobby.chase_id = leader.player_id
+            else:
+                lobby.chase_id = current.player_id
+        return lobby.chase_id != previous
+
+    def _finish(self, lobby: Lobby) -> None:
+        if lobby.finished or lobby.ends_at is None:
+            return
+        self._decay_to(lobby, lobby.ends_at + SCORE_GRACE_SECONDS)
+        self._retarget(lobby)
+        lobby.finished = True
+
     def _new_code(self) -> str:
         while True:
             code = "".join(secrets.choice(ALPHABET) for _ in range(CODE_LENGTH))
@@ -173,7 +256,13 @@ class LobbyBook:
                 return code
 
 
-def player_snapshot(player: Player, viewer_id: str, started: bool) -> dict:
+def snapshot_players(lobby: Lobby) -> list[Player]:
+    if not lobby.started:
+        return lobby.players
+    return sorted(lobby.players, key=lambda player: (-player.pull, player.seat))
+
+
+def player_snapshot(player: Player, viewer_id: str, started: bool, chase_id: str | None) -> dict:
     entry = {
         "name": player.name,
         "you": player.player_id == viewer_id,
@@ -182,6 +271,8 @@ def player_snapshot(player: Player, viewer_id: str, started: bool) -> dict:
     }
     if started:
         entry["angle"] = player.angle
+        entry["pull"] = round(player.pull, 2)
+        entry["chased"] = player.player_id == chase_id
     return entry
 
 
