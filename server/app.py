@@ -13,6 +13,7 @@ import time
 
 from aiohttp import ClientConnectionError, WSMsgType, web
 
+from server.bridge import Bridge
 from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
 
 HOST = "0.0.0.0"
@@ -525,9 +526,15 @@ def create_app() -> web.Application:
     app = web.Application()
     app["book"] = LobbyBook()
     app["sockets"] = {}
+    app["bridge"] = Bridge()
+    app.on_cleanup.append(close_bridge)
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket)
     return app
+
+
+async def close_bridge(app: web.Application) -> None:
+    app["bridge"].close()
 
 
 async def index(_request: web.Request) -> web.Response:

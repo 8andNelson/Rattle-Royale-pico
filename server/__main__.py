@@ -1,6 +1,7 @@
 """Run the phone connection server."""
 
 import logging
+import os
 import socket
 from pathlib import Path
 
@@ -49,7 +50,13 @@ def main() -> None:
         log.info("On your phone:  %s", public)
     else:
         log.info("On your phone:  put the ngrok url in ngrok.yml")
-    web.run_app(create_app(), host=HOST, port=PORT)
+    app = create_app()
+    port_name = os.environ.get("RATTLE_PORT", "").strip()
+    if port_name:
+        app["bridge"].open_port(port_name)
+    else:
+        log.info("Robot offline (RATTLE_PORT is not set)")
+    web.run_app(app, host=HOST, port=PORT)
 
 
 if __name__ == "__main__":
