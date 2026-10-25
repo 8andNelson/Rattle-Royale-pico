@@ -1,11 +1,11 @@
 // Test sketch for a 28BYJ-48 (or similar) on a ULN2003 board.
-// Wiring: IN1 -> pin 8, IN2 -> pin 9, IN3 -> pin 10, IN4 -> pin 11,
-//         driver VCC -> Arduino 5V, driver GND -> Arduino GND.
+// Wiring: IN1 -> A0, IN2 -> A1, IN3 -> A2, IN4 -> A3,
+//         driver VCC -> motor supply, driver GND -> Arduino GND.
 //
 // On power-up the motor takes a short move one way, pauses, then
 // returns. About 4096 half-steps is one revolution of a 28BYJ-48.
 
-const int kPins[4] = {8, 9, 10, 11};
+const int kPins[4] = {A0, A1, A2, A3};
 const int kStepDelayMs = 3;
 const long kStepsPerMove = 512;
 const int kPauseMs = 1000;
