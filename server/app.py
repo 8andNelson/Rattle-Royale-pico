@@ -1,11 +1,13 @@
-"""Phone connection and lobbies.
+"""Phone connection, lobbies, and a 20-second click game.
 
-A phone opens the page, holds a WebSocket, and can create or join a lobby
-of up to eight players. Seats, scoring, and the round are not part of this step.
+A phone can create or join a lobby of up to eight players. The creator starts
+the game. Each tap adds one to that player's count until the timer ends.
 """
 
+import asyncio
 import json
 import logging
+import time
 
 from aiohttp import WSMsgType, web
 
@@ -48,8 +50,13 @@ PAGE = """<!DOCTYPE html>
       width: 100%;
       margin: 0 0 0.9rem;
       padding: 0.85rem;
+      touch-action: manipulation;
     }
-    #error { min-height: 1.2rem; margin: 0; color: #ffb4b4; }
+    #clock { font-size: 2.5rem; margin: 0 0 0.5rem; }
+    #result { font-size: 2rem; margin: 0 0 1rem; }
+    #tap { font-size: 2rem; padding: 2.2rem 0.85rem; }
+    #error { min-height: 1.2rem; margin: 0; color: #ffb4b4; text-align: center; }
+    #waiting { margin: 0 0 0.9rem; color: #aaa; }
     #lobby { text-align: center; }
     #lobby-code {
       font-size: 3rem;
@@ -71,14 +78,19 @@ PAGE = """<!DOCTYPE html>
       <label for="code">Lobby code</label>
       <input id="code" maxlength="4" autocapitalize="characters" autocomplete="off" enterkeyhint="go">
       <button id="join-lobby" type="button">Join lobby</button>
-      <p id="error"></p>
     </section>
     <section id="lobby" hidden>
       <p id="lobby-code"></p>
       <p id="lobby-count"></p>
       <ul id="players"></ul>
+      <p id="clock" hidden></p>
+      <p id="result" hidden></p>
+      <button id="start" type="button" hidden>Start game</button>
+      <p id="waiting" hidden>Waiting for the creator to start</p>
+      <button id="tap" type="button" hidden>Tap</button>
       <button id="leave" type="button">Leave lobby</button>
     </section>
+    <p id="error"></p>
   </main>
   <script>
     const statusEl = document.getElementById("status");
@@ -91,10 +103,43 @@ PAGE = """<!DOCTYPE html>
     let socket = null;
     let inLobby = false;
     let retryTimer = null;
+    let countdownTimer = null;
+
+    function stopCountdown() {
+      if (countdownTimer !== null) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+      }
+    }
 
     function showJoin() {
+      stopCountdown();
       lobbyEl.hidden = true;
       joinEl.hidden = false;
+    }
+
+    function winnerText(winners) {
+      if (!winners || winners.length === 0) {
+        return "No winner";
+      }
+      if (winners.length === 1) {
+        return winners[0] + " wins";
+      }
+      return "Tie: " + winners.join(", ");
+    }
+
+    function runCountdown(endsAt) {
+      stopCountdown();
+      const clock = document.getElementById("clock");
+      function tick() {
+        const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+        clock.textContent = left + "s";
+        if (left <= 0) {
+          stopCountdown();
+        }
+      }
+      tick();
+      countdownTimer = setInterval(tick, 200);
     }
 
     function showLobby(message) {
@@ -102,14 +147,39 @@ PAGE = """<!DOCTYPE html>
       errorEl.textContent = "";
       joinEl.hidden = true;
       lobbyEl.hidden = false;
+      const playing = message.started && !message.finished;
       document.getElementById("lobby-code").textContent = message.code;
       document.getElementById("lobby-count").textContent =
         message.players.length + " of " + message.max;
+      document.getElementById("start").hidden = !(message.creator && !message.started);
+      document.getElementById("waiting").hidden = message.creator || message.started;
+      document.getElementById("tap").hidden = !playing;
+      document.getElementById("leave").hidden = playing;
+      const clock = document.getElementById("clock");
+      const result = document.getElementById("result");
+      if (playing) {
+        clock.hidden = false;
+        result.hidden = true;
+        result.textContent = "";
+        runCountdown(message.ends_at);
+      } else if (message.finished) {
+        stopCountdown();
+        clock.hidden = true;
+        result.hidden = false;
+        result.textContent = winnerText(message.winners);
+      } else {
+        stopCountdown();
+        clock.hidden = true;
+        result.hidden = true;
+        result.textContent = "";
+      }
       const list = document.getElementById("players");
       list.replaceChildren();
       message.players.forEach((player) => {
         const item = document.createElement("li");
-        item.textContent = player.you ? player.name + " (you)" : player.name;
+        const marker = player.you ? " (you)" : "";
+        const clicks = message.started ? " — " + player.clicks : "";
+        item.textContent = player.name + marker + clicks;
         list.append(item);
       });
     }
@@ -128,6 +198,12 @@ PAGE = """<!DOCTYPE html>
     });
     document.getElementById("join-lobby").addEventListener("click", () => {
       send({ type: "join", name: nameEl.value, code: codeEl.value });
+    });
+    document.getElementById("start").addEventListener("click", () => {
+      send({ type: "start" });
+    });
+    document.getElementById("tap").addEventListener("click", () => {
+      send({ type: "click" });
     });
     document.getElementById("leave").addEventListener("click", () => {
       send({ type: "leave" });
@@ -267,6 +343,19 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
                 await drop_player(app, previous)
             log.info("player %s entered lobby %s", player_id, code)
             await broadcast(app, code)
+        elif kind == "start":
+            if player_id is None:
+                raise LobbyError("You are not in a lobby.")
+            code = book.start(player_id)
+            log.info("lobby %s started", code)
+            await broadcast(app, code)
+            app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
+        elif kind == "click":
+            if player_id is None:
+                raise LobbyError("You are not in a lobby.")
+            code, changed = book.click(player_id)
+            if changed:
+                await broadcast(app, code)
         elif kind == "leave":
             if player_id is not None:
                 await drop_player(app, player_id)
@@ -277,6 +366,22 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
     except LobbyError as error:
         await send_error(socket, error.message)
     return player_id
+
+
+async def finish_when_due(app: web.Application, code: str) -> None:
+    book: LobbyBook = app["book"]
+    while True:
+        deadline = book.deadline(code)
+        if deadline is None:
+            return
+        delay = deadline - time.time()
+        if delay <= 0:
+            break
+        await asyncio.sleep(delay)
+    if book.finish_if_due(code):
+        log.info("lobby %s finished", code)
+        await broadcast(app, code)
+    app.setdefault("round_tasks", {}).pop(code, None)
 
 
 async def drop_player(app: web.Application, player_id: str) -> None:
