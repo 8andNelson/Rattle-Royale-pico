@@ -29,6 +29,7 @@ htmlcov/
 .piolibdeps/
 
 # Secrets and local config
+pico/config.py
 .env
 .env.*
 *.local

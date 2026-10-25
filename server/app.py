@@ -15,6 +15,7 @@ from aiohttp import ClientConnectionError, WSMsgType, web
 
 from server.bridge import Bridge
 from server.lobby import PULL_TICK_SECONDS, LobbyBook, LobbyError
+from server.robot import RobotLink
 
 HOST = "0.0.0.0"
 PORT = 8080
@@ -69,6 +70,9 @@ PAGE = """<!DOCTYPE html>
     #your-seat { font-size: 2rem; margin: 0 0 0.25rem; }
     #your-mark { margin: 0 0 0.35rem; color: #aaa; }
     #chase { font-size: 1.25rem; margin: 0 0 1rem; }
+    #round-kind, #robot-status { margin: 0 0 0.75rem; color: #aaa; }
+    #arena { display: block; width: 100%; max-width: 18rem; margin: 0 auto 1rem; }
+    #arena[hidden] { display: none; }
     #players { list-style: none; padding: 0; margin: 0 0 1.25rem; font-size: 1.35rem; }
     #players li { padding: 0.35rem 0; }
     #shakes { font-size: 1.6rem; margin: 0 0 0.4rem; text-align: center; }
@@ -94,11 +98,15 @@ PAGE = """<!DOCTYPE html>
       <p id="lobby-count"></p>
       <p id="your-seat"></p>
       <p id="your-mark"></p>
+      <p id="round-kind" hidden></p>
+      <p id="robot-status"></p>
       <p id="chase" hidden></p>
+      <svg id="arena" viewBox="-130 -130 260 260" hidden></svg>
       <ul id="players"></ul>
       <p id="clock" hidden></p>
       <p id="result" hidden></p>
       <button id="start" type="button" hidden>Start game</button>
+      <button id="robot-home" type="button" hidden>The robot is on the center mark</button>
       <p id="waiting" hidden>Waiting for the creator to start</p>
       <button id="leave" type="button">Leave lobby</button>
     </section>
@@ -136,7 +144,16 @@ PAGE = """<!DOCTYPE html>
       joinEl.hidden = !shaking;
     }
 
-    function winnerText(winners) {
+    function winnerText(winners, reason) {
+      if (reason === "arrival" && winners.length === 1) {
+        return "The robot reached " + winners[0] + ". " + winners[0] + " wins";
+      }
+      if (reason === "clock" && winners.length === 1) {
+        return "Time. The robot was chasing " + winners[0] + ". " + winners[0] + " wins";
+      }
+      if (reason === "draw") {
+        return "Nobody shook. Draw";
+      }
       if (!winners || winners.length === 0) {
         return "No winner";
       }
@@ -160,6 +177,68 @@ PAGE = """<!DOCTYPE html>
       countdownTimer = setInterval(tick, 200);
     }
 
+    const SVG = "http://www.w3.org/2000/svg";
+
+    function svgEl(name, attributes) {
+      const element = document.createElementNS(SVG, name);
+      Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, value));
+      return element;
+    }
+
+    function robotStatusText(message) {
+      const robot = message.robot;
+      if (!robot || !robot.online) {
+        return message.started ? "Robot offline" : "Robot offline. This will be a 20-second shake contest.";
+      }
+      if (message.started) {
+        return "Robot online";
+      }
+      return robot.home ? "Robot ready on the center mark" : "Robot online, not on the center mark yet";
+    }
+
+    // Marks on a circle, seat 0 to the right, higher seats counterclockwise.
+    // The robot is a triangle at its pose, pointing along its heading.
+    function drawArena(message) {
+      const arena = document.getElementById("arena");
+      const robot = message.robot;
+      const show = message.chase || (robot && robot.online && !message.started);
+      arena.hidden = !show;
+      if (!show) {
+        return;
+      }
+      arena.replaceChildren();
+      const scale = 100 / ((robot && robot.radius) || 250);
+      arena.append(svgEl("circle", { cx: 0, cy: 0, r: 100, fill: "none", stroke: "#444", "stroke-width": 2 }));
+      arena.append(svgEl("circle", { cx: 0, cy: 0, r: 5, fill: "#444" }));
+      const count = message.players.length;
+      message.players.forEach((player) => {
+        const angle = player.angle != null ? player.angle : (360 * player.seat) / count;
+        const theta = (angle * Math.PI) / 180;
+        const x = 100 * Math.cos(theta);
+        const y = -100 * Math.sin(theta);
+        arena.append(svgEl("circle", {
+          cx: x, cy: y, r: 14,
+          fill: player.chased ? "#c33" : "#2a2a2a",
+          stroke: player.you ? "#fff" : "#666",
+          "stroke-width": player.you ? 3 : 1.5,
+        }));
+        const label = svgEl("text", {
+          x: x, y: y + 5, "text-anchor": "middle", fill: "#f4f4f4", "font-size": 14,
+        });
+        label.textContent = player.seat;
+        arena.append(label);
+      });
+      if (robot && robot.online && robot.pose) {
+        const x = robot.pose.x * scale;
+        const y = -robot.pose.y * scale;
+        arena.append(svgEl("polygon", {
+          points: "12,0 -8,-8 -8,8",
+          fill: "#ffd24a",
+          transform: "translate(" + x + " " + y + ") rotate(" + (-robot.pose.heading) + ")",
+        }));
+      }
+    }
+
     function showLobby(message) {
       inLobby = true;
       const nowPlaying = message.started && !message.finished;
@@ -177,6 +256,15 @@ PAGE = """<!DOCTYPE html>
       document.getElementById("lobby-count").textContent =
         message.players.length + " of " + message.max;
       document.getElementById("start").hidden = !(message.creator && !message.started);
+      const robotOnline = Boolean(message.robot && message.robot.online);
+      document.getElementById("robot-home").hidden = !(message.creator && !message.started && robotOnline);
+      document.getElementById("robot-status").textContent = robotStatusText(message);
+      const roundKind = document.getElementById("round-kind");
+      roundKind.hidden = !message.started;
+      roundKind.textContent = message.chase
+        ? "Chase round. Get the robot to reach you."
+        : "Shake contest. Most shakes wins.";
+      drawArena(message);
       document.getElementById("waiting").hidden = message.creator || message.started;
       document.getElementById("leave").hidden = playing;
       const mine = message.players.find((player) => player.you);
@@ -214,7 +302,7 @@ PAGE = """<!DOCTYPE html>
         stopCountdown();
         clock.hidden = true;
         result.hidden = false;
-        result.textContent = winnerText(message.winners);
+        result.textContent = winnerText(message.winners, message.reason);
       } else {
         stopCountdown();
         clock.hidden = true;
@@ -259,6 +347,9 @@ PAGE = """<!DOCTYPE html>
     });
     document.getElementById("start").addEventListener("click", () => {
       send({ type: "start" });
+    });
+    document.getElementById("robot-home").addEventListener("click", () => {
+      send({ type: "robot_home" });
     });
     document.getElementById("leave").addEventListener("click", () => {
       send({ type: "leave" });
@@ -522,14 +613,20 @@ PAGE = """<!DOCTYPE html>
 """
 
 
-def create_app() -> web.Application:
+def create_app(robot_token: str | None = None) -> web.Application:
     app = web.Application()
     app["book"] = LobbyBook()
     app["sockets"] = {}
     app["bridge"] = Bridge()
+    app["robot"] = RobotLink(robot_token)
+    app.on_startup.append(start_watch)
+    app.on_cleanup.append(stop_watch)
     app.on_cleanup.append(close_bridge)
     app.router.add_get("/", index)
     app.router.add_get("/ws", websocket)
+    app.router.add_post("/api/robot", robot_poll)
+    app.router.add_get("/api/robot/status", robot_status)
+    app.router.add_post("/api/robot/test", robot_test)
     return app
 
 
@@ -592,8 +689,15 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
         elif kind == "start":
             if player_id is None:
                 raise LobbyError("You are not in a lobby.")
-            code = book.start(player_id)
-            log.info("lobby %s started", code)
+            book.check_start(player_id)
+            robot: RobotLink = app["robot"]
+            chase = robot.online()
+            if chase and book.robot_round() is not None:
+                raise LobbyError("The robot is busy with another lobby's chase.")
+            if chase and not robot.at_home():
+                raise LobbyError("The robot is not on the center mark yet.")
+            code = book.start(player_id, chase=chase)
+            log.info("lobby %s started%s", code, " as a chase" if chase else "")
             await broadcast(app, code)
             app.setdefault("round_tasks", {})[code] = asyncio.create_task(finish_when_due(app, code))
             app.setdefault("pull_tasks", {})[code] = asyncio.create_task(fade_pull(app, code))
@@ -603,6 +707,15 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
             code, changed = book.record_shakes(player_id, payload.get("total"))
             if changed:
                 await broadcast(app, code)
+        elif kind == "robot_home":
+            if player_id is None:
+                raise LobbyError("You are not in a lobby.")
+            book.check_start(player_id)
+            if book.robot_round() is not None:
+                raise LobbyError("The robot is in a chase right now.")
+            app["robot"].request_reset()
+            log.info("robot pose reset to the center")
+            await broadcast_all(app)
         elif kind == "leave":
             if player_id is not None:
                 await drop_player(app, player_id)
@@ -613,6 +726,89 @@ async def handle_text(app: web.Application, socket: web.WebSocketResponse, playe
     except LobbyError as error:
         await send_error(socket, error.message)
     return player_id
+
+
+def robot_link(request: web.Request) -> RobotLink:
+    robot: RobotLink = request.app["robot"]
+    if not robot.enabled:
+        raise web.HTTPServiceUnavailable(text="The robot link is off. Set RATTLE_ROBOT_TOKEN.")
+    if not robot.authorized(request.headers.get("Authorization")):
+        raise web.HTTPUnauthorized(text="Wrong robot token.")
+    return robot
+
+
+async def read_json(request: web.Request) -> object:
+    try:
+        return await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise web.HTTPBadRequest(text="That body could not be read.")
+
+
+async def robot_poll(request: web.Request) -> web.Response:
+    robot = robot_link(request)
+    app = request.app
+    book: LobbyBook = app["book"]
+    order, arrival = robot.poll(book, await read_json(request))
+    if arrival is not None:
+        log.info("robot reached seat %s in lobby %s", arrival["seat"], arrival["round"])
+        if arrival["won"]:
+            log.info("lobby %s finished by arrival", arrival["round"])
+            order = robot.order(book)
+            await broadcast(app, arrival["round"])
+    await robot_changed(app)
+    return web.json_response(order)
+
+
+async def robot_changed(app: web.Application) -> None:
+    """Every lobby hears when the robot comes, goes, or gets home. The open
+    chase also hears every new pose."""
+    robot: RobotLink = app["robot"]
+    book: LobbyBook = app["book"]
+    state = (robot.online(), robot.at_home())
+    if state != app.get("robot_state"):
+        if state[0] != (app.get("robot_state") or (False,))[0]:
+            log.info("robot %s", "online" if state[0] else "offline")
+        app["robot_state"] = state
+        await broadcast_all(app)
+        return
+    current = book.robot_round()
+    if current is not None and robot.pose != app.get("robot_pose"):
+        app["robot_pose"] = robot.pose
+        await broadcast(app, current["code"])
+
+
+async def watch_robot(app: web.Application) -> None:
+    """Catch the robot going quiet, which no poll will report."""
+    while True:
+        await asyncio.sleep(1)
+        await robot_changed(app)
+
+
+async def start_watch(app: web.Application) -> None:
+    app["robot_watch"] = asyncio.create_task(watch_robot(app))
+
+
+async def stop_watch(app: web.Application) -> None:
+    app["robot_watch"].cancel()
+    try:
+        await app["robot_watch"]
+    except asyncio.CancelledError:
+        pass
+
+
+async def robot_status(request: web.Request) -> web.Response:
+    robot = robot_link(request)
+    return web.json_response(robot.status(request.app["book"]))
+
+
+async def robot_test(request: web.Request) -> web.Response:
+    """Send the robot to a point when no round is open, or clear that point."""
+    robot = robot_link(request)
+    try:
+        robot.set_test_point(await read_json(request))
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=str(error))
+    return web.json_response(robot.status(request.app["book"]))
 
 
 async def finish_when_due(app: web.Application, code: str) -> None:
@@ -654,14 +850,22 @@ async def drop_player(app: web.Application, player_id: str) -> None:
 async def broadcast(app: web.Application, code: str) -> None:
     book: LobbyBook = app["book"]
     sockets: dict[str, web.WebSocketResponse] = app["sockets"]
+    robot = app["robot"].summary()
     for player_id in book.member_ids(code):
         destination = sockets.get(player_id)
         if destination is None or destination.closed:
             continue
+        snapshot = book.snapshot(code, player_id)
+        snapshot["robot"] = robot
         try:
-            await destination.send_str(json.dumps(book.snapshot(code, player_id)))
+            await destination.send_str(json.dumps(snapshot))
         except ClientConnectionError:
             continue
+
+
+async def broadcast_all(app: web.Application) -> None:
+    for code in app["book"].codes():
+        await broadcast(app, code)
 
 
 async def send_error(socket: web.WebSocketResponse, message: str) -> None:

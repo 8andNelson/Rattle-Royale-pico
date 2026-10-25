@@ -24,6 +24,31 @@ The motion that would aim the robot is specified further down and is not in this
 | Serial bridge | Same laptop, using pyserial | Opens `RATTLE_PORT` at startup, sends one command, and waits for the reply. A round does not send moves yet |
 | Firmware | Arduino | `firmware/dual_motor` accepts `SPIN`, `DRIVE`, `STOP`, and `PING`. `drive_test` rolls the car. `spin_test` turns it in place |
 
+## Wireless robot (Pico W)
+
+The robot can run on a Raspberry Pi Pico W instead of the Arduino, with no cable to the laptop. The code is in `pico/` and runs under MicroPython. The Arduino path below still works and is untouched.
+
+The split is different from the Arduino plan. The Pico W owns the pose, the planning, and the stepping. The laptop only says what to do.
+
+```text
+Pico W                                     Laptop
+POST /api/robot  --HTTPS via ngrok-->      game server
+  pose, moving, arrival                      reply: chase / hold / home / test
+```
+
+- The Pico polls `POST /api/robot` about every 300 ms on one kept-alive HTTPS connection, through the same ngrok address the phones use. Any Wi-Fi with internet works, including a phone hotspot. eduroam's enterprise login does not.
+- Every request needs `Authorization: Bearer <token>`. The token is `RATTLE_ROBOT_TOKEN` on the laptop and `ROBOT_TOKEN` in `pico/config.py`. With no token set, the robot endpoints answer 503.
+- The reply is one of: `chase` with the chased seat's mark in millimeters, `hold` (a round is open and nobody has pull), `home` (no round is open), or `test` with a point set through `POST /api/robot/test`. `GET /api/robot/status` shows the last pose and the current order.
+- Marks sit on a circle of `MARK_RADIUS_MM` (250 mm, in `server/robot.py`). Seat 0 is along +x, and higher seats go counterclockwise seen from above. Lay the floor marks out that way.
+- The Pico starts its pose at the center, pointed at seat 0, so it must be placed there before power-on. In `home` it drives back to the center and faces seat 0 on its own.
+- Core 1 does nothing but step the motors, so a slow HTTPS request on core 0 never stalls them. A move can be cut short at any step. The pose counts only the steps the wheels took, so a new order stops the move in flight and replans at once.
+- A chase reports arrival inside `ARRIVAL_RADIUS_MM` (75 mm). The server logs it. The winner is still the highest shake count.
+- Without a good reply for 2 seconds, the robot holds still.
+
+Pico W wiring: left ULN2003 IN1–IN4 on GP2–GP5, right ULN2003 IN1–IN4 on GP6–GP9, and Pico GND tied to both driver grounds and the motor supply ground. Driver VCC comes from the motor supply, never from the Pico's 3.3 V pin.
+
+At 3 ms per half-step and 38 mm wheels, the robot moves about 10 mm per second. Crossing a 250 mm circle takes about 25 seconds, longer than the 20-second round. A faster `STEP_US` or a longer round is needed before arrival can decide anything.
+
 ## What already exists
 
 The phone game lives in `server/`. Start it from the project folder with `python -m server`. It serves the page at `/` and a WebSocket at `/ws`. `requirements.txt` includes `aiohttp` for that server and `pyserial` for the Arduino link. `server/bridge.py` is the only module that imports `pyserial`.

@@ -50,7 +50,12 @@ def main() -> None:
         log.info("On your phone:  %s", public)
     else:
         log.info("On your phone:  put the ngrok url in ngrok.yml")
-    app = create_app()
+    robot_token = os.environ.get("RATTLE_ROBOT_TOKEN", "").strip()
+    app = create_app(robot_token or None)
+    if robot_token:
+        log.info("Wireless robot link on at /api/robot")
+    else:
+        log.info("Wireless robot link off (RATTLE_ROBOT_TOKEN is not set)")
     port_name = os.environ.get("RATTLE_PORT", "").strip()
     if port_name:
         app["bridge"].open_port(port_name)
